@@ -43,6 +43,12 @@ HomeController::HomeController(IBackendService* backendService,
 
               setInRoom(true);
 
+              m_roomService->setMicEnabled(false);
+              m_roomService->setCameraEnabled(false);
+
+              // 立即拉取远端状态，确保入会前他人已发布的屏幕共享能马上被发现
+              m_roomService->refreshRemoteState();
+
               setStatusMessage(QString("LiveKit 连接成功：%1").arg(serverUrl));
 
               return;

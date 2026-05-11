@@ -1,7 +1,0 @@
-module MultiLive
-typeinfo appMultiLive.qmltypes
-prefer :/qt/qml/MultiLive/
-App 254.0 src/presentation/qml/App.qml
-HomePage 254.0 src/presentation/qml/pages/HomePage.qml
-depends QtQuick
-

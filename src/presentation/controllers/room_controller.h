@@ -98,8 +98,8 @@ private:
   IRoomService* m_roomService;
   IDeviceService* m_deviceService;
   FrameImageProvider* m_frameImageProvider;
-  bool m_micEnabled = true;
-  bool m_cameraEnabled = true;
+  bool m_micEnabled = false;
+  bool m_cameraEnabled = false;
   bool m_screenShareEnabled = false;
   QString m_micToggleText;
   QString m_cameraToggleText;

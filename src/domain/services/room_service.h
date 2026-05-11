@@ -1,11 +1,14 @@
 #pragma once
 
+#include <QObject>
 #include <QString>
 #include <QVariantList>
 
-class IRoomService {
+class IRoomService : public QObject {
+  Q_OBJECT
 public:
-  virtual ~IRoomService() = default;
+  explicit IRoomService(QObject* parent = nullptr) : QObject(parent) {}
+  ~IRoomService() override = default;
 
   virtual bool connect(const QString& serverUrl,
                        const QString& token,
@@ -25,4 +28,7 @@ public:
   virtual QVariantList remoteVideoTiles() const = 0;
   virtual QString remoteVideoSourceText() const = 0;
   virtual QString lastError() const = 0;
+
+signals:
+  void remoteStateDirty();
 };

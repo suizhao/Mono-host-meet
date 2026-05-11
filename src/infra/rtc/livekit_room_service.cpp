@@ -8,6 +8,8 @@
 #include <livekit/track.h>
 #include <livekit/video_frame.h>
 #include <livekit/video_source.h>
+
+#include <QCoreApplication>
 #include <livekit/video_stream.h>
 
 #include <QBuffer>
@@ -383,6 +385,7 @@ bool LiveKitRoomService::connect(const QString& serverUrl,
   }
 
   m_room = std::make_unique<livekit::Room>();
+  m_room->setDelegate(this);
 
   livekit::RoomOptions options;
   options.auto_subscribe = true;
@@ -415,18 +418,33 @@ void LiveKitRoomService::disconnect() {
   setScreenShareEnabled(false);
 
   if (m_room) {
-    for (auto it = m_streamBindings.begin(); it != m_streamBindings.end(); ++it) {
-      const auto& binding = it.value();
-      try {
-        m_room->clearOnVideoFrameCallback(binding.identity.toStdString(), binding.source);
-      } catch (...) {
+    {
+      QMutexLocker locker(&m_streamBindingsMutex);
+      for (auto it = m_streamBindings.begin(); it != m_streamBindings.end(); ++it) {
+        const auto& binding = it.value();
+        try {
+          m_room->clearOnVideoFrameCallback(binding.identity.toStdString(), binding.source);
+        } catch (...) {
+        }
       }
+      m_streamBindings.clear();
     }
-    m_streamBindings.clear();
+  }
 
+  // 在 Room 对象仍存活时主动关闭 SDK，确保 WebSocket 能发送 Close Frame，
+  // 让服务端即时感知断开。仅在正常离会路径执行；析构时跳过以避免崩溃。
+  if (m_livekitInitialized && !QCoreApplication::closingDown()) {
+    livekit::shutdown();
+    m_livekitInitialized = false;
+  }
+
+  if (m_room) {
     m_room.reset();
   }
-  m_streamBindings.clear();
+  {
+    QMutexLocker locker(&m_streamBindingsMutex);
+    m_streamBindings.clear();
+  }
 
   {
     QMutexLocker locker(&m_remoteState->mutex);
@@ -435,6 +453,8 @@ void LiveKitRoomService::disconnect() {
     m_remoteState->videoDataUrl.clear();
     m_remoteState->tiles.clear();
   }
+
+  m_remoteIdsHadTracks.clear();
 
   if (m_connected) {
     m_connected = false;
@@ -651,6 +671,22 @@ bool LiveKitRoomService::setScreenShareEnabled(bool enabled) {
 #endif
 
       if (frameReady) {
+        // 必须在 captureFrame 之前拷贝帧用于本地预览；
+        // SDK 调用 captureFrame 后取得数据所有权，之后 frame.data() 不可再用。
+        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+        const bool doPreview = nowMs - lastLocalPreviewMs >= kPreviewUpdateIntervalMs;
+        QImage previewCopy;
+        if (doPreview) {
+          const QImage image(frame.data(), frame.width(), frame.height(),
+                             QImage::Format_RGBA8888);
+          if (!image.isNull()) {
+            previewCopy =
+                image.width() > 1280
+                    ? image.copy().scaledToWidth(1280, Qt::SmoothTransformation)
+                    : image.copy();
+          }
+        }
+
         try {
           const auto now = std::chrono::steady_clock::now().time_since_epoch();
           const auto timestampUs =
@@ -660,33 +696,22 @@ bool LiveKitRoomService::setScreenShareEnabled(bool enabled) {
         } catch (...) {
         }
 
-        // 本地预览旁路：Room 的视频回调主要面向远端订阅流，
-        // 单人会议下本地发布轨可能不会回环到 setOnVideoFrameCallback。
-        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
-        if (nowMs - lastLocalPreviewMs >= kPreviewUpdateIntervalMs) {
-          const QImage image(frame.data(), frame.width(), frame.height(),
-                             QImage::Format_RGBA8888);
-          if (!image.isNull()) {
-            QByteArray encodedBytes;
-            QBuffer buffer(&encodedBytes);
-            if (buffer.open(QIODevice::WriteOnly)) {
-              const QImage scaled =
-                  image.width() > 1600
-                      ? image.copy().scaledToWidth(1600, Qt::SmoothTransformation)
-                      : image.copy();
-              if (scaled.save(&buffer, "JPEG", 88)) {
-                const QString dataUrl =
-                    "data:image/jpeg;base64," + QString::fromLatin1(encodedBytes.toBase64());
-                QMutexLocker locker(&m_remoteState->mutex);
-                auto& tile = m_remoteState->tiles[localShareTileKey];
-                tile.tileId = localShareTileKey;
-                tile.identity = localIdentity;
-                tile.displayName = "我自己";
-                tile.sourceText = "屏幕共享";
-                tile.isLocal = true;
-                tile.dataUrl = dataUrl;
-                tile.lastFrameMs = nowMs;
-              }
+        if (!previewCopy.isNull()) {
+          QByteArray encodedBytes;
+          QBuffer buffer(&encodedBytes);
+          if (buffer.open(QIODevice::WriteOnly)) {
+            if (previewCopy.save(&buffer, "JPEG", 75)) {
+              const QString dataUrl =
+                  "data:image/jpeg;base64," + QString::fromLatin1(encodedBytes.toBase64());
+              QMutexLocker locker(&m_remoteState->mutex);
+              auto& tile = m_remoteState->tiles[localShareTileKey];
+              tile.tileId = localShareTileKey;
+              tile.identity = localIdentity;
+              tile.displayName = "我自己";
+              tile.sourceText = "屏幕共享";
+              tile.isLocal = true;
+              tile.dataUrl = dataUrl;
+              tile.lastFrameMs = nowMs;
             }
           }
           lastLocalPreviewMs = nowMs;
@@ -795,24 +820,216 @@ void LiveKitRoomService::refreshRemoteState() {
     appendBindings(localIdentity, "我自己", true, m_room->localParticipant()->trackPublications());
   }
 
+  // 为没有视频轨的参与者创建占位 tile（远端 + 本地），确保始终显示在场成员
+  {
+    QMutexLocker locker(&m_remoteState->mutex);
+
+    // 收集有视频或未静音音频轨的参与者（有任一活跃轨道即视为"确实在房间里"）
+    QSet<QString> identitiesWithActiveTrack;
+    for (auto it = desiredBindings.cbegin(); it != desiredBindings.cend(); ++it) {
+      identitiesWithActiveTrack.insert(it.value().identity);
+    }
+    // 补充检测音频轨（appendBindings 只看视频）
+    auto hasActiveAudio = [](const auto& publicationMap) -> bool {
+      for (const auto& [sid, pub] : publicationMap) {
+        Q_UNUSED(sid);
+        if (pub && pub->kind() == livekit::TrackKind::KIND_AUDIO && !pub->muted()) {
+          return true;
+        }
+      }
+      return false;
+    };
+    for (const auto& participant : remoteParticipants) {
+      if (!participant) continue;
+      const QString identity = QString::fromStdString(participant->identity());
+      if (!identitiesWithActiveTrack.contains(identity) &&
+          hasActiveAudio(participant->trackPublications())) {
+        identitiesWithActiveTrack.insert(identity);
+      }
+    }
+    if (m_room->localParticipant()) {
+      const QString localId = QString::fromStdString(m_room->localParticipant()->identity());
+      if (!identitiesWithActiveTrack.contains(localId) &&
+          hasActiveAudio(m_room->localParticipant()->trackPublications())) {
+        identitiesWithActiveTrack.insert(localId);
+      }
+    }
+
+    // 更新"曾有过轨道"的记录；用于判断参与者是否可能已断开
+    for (const auto& identity : identitiesWithActiveTrack) {
+      m_remoteIdsHadTracks.insert(identity);
+    }
+
+    QSet<QString> currentRemoteIdentities;
+    for (const auto& participant : remoteParticipants) {
+      if (participant) {
+        currentRemoteIdentities.insert(
+            QString::fromStdString(participant->identity()));
+      }
+    }
+
+    // 清理已离开参与者的记录
+    for (auto it = m_remoteIdsHadTracks.begin();
+         it != m_remoteIdsHadTracks.end();) {
+      if (!currentRemoteIdentities.contains(*it)) {
+        it = m_remoteIdsHadTracks.erase(it);
+      } else {
+        ++it;
+      }
+    }
+
+    // 清理已离开参与者的所有 tile（视频轨 + 占位），确保离会后不留残留画面
+    for (auto it = m_remoteState->tiles.begin();
+         it != m_remoteState->tiles.end();) {
+      if (!it.value().isLocal &&
+          !currentRemoteIdentities.contains(it.value().identity)) {
+        it = m_remoteState->tiles.erase(it);
+      } else {
+        ++it;
+      }
+    }
+
+    // 为无视频轨的远端参与者添加占位 tile
+    for (const auto& participant : remoteParticipants) {
+      if (!participant) {
+        continue;
+      }
+      const QString identity = QString::fromStdString(participant->identity());
+      if (identitiesWithActiveTrack.contains(identity)) {
+        m_remoteState->tiles.remove(identity + "|presence");
+        continue;
+      }
+      const QString name = QString::fromStdString(participant->name());
+      const QString disp = name.isEmpty() ? identity : name;
+      const QString presenceKey = identity + "|presence";
+      auto& tile = m_remoteState->tiles[presenceKey];
+      tile.tileId = presenceKey;
+      tile.identity = identity;
+      tile.displayName = disp;
+      tile.sourceText = "无视频流";
+      tile.isLocal = false;
+    }
+
+    // 为本地参与者添加占位 tile（如果无视频轨）
+    if (m_room->localParticipant()) {
+      const QString localIdentity =
+          QString::fromStdString(m_room->localParticipant()->identity());
+      const QString presenceKey = localIdentity + "|presence";
+      if (identitiesWithActiveTrack.contains(localIdentity)) {
+        m_remoteState->tiles.remove(presenceKey);
+      } else {
+        auto& tile = m_remoteState->tiles[presenceKey];
+        tile.tileId = presenceKey;
+        tile.identity = localIdentity;
+        tile.displayName = "我自己";
+        tile.sourceText = "无视频流";
+        tile.isLocal = true;
+      }
+    }
+  }
+
   QSet<QString> desiredKeys;
   for (auto it = desiredBindings.cbegin(); it != desiredBindings.cend(); ++it) {
     desiredKeys.insert(it.key());
   }
-  QSet<QString> existingKeys;
-  for (auto it = m_streamBindings.cbegin(); it != m_streamBindings.cend(); ++it) {
-    existingKeys.insert(it.key());
+
+  {
+    QMutexLocker locker(&m_streamBindingsMutex);
+
+    QSet<QString> existingKeys;
+    for (auto it = m_streamBindings.cbegin(); it != m_streamBindings.cend(); ++it) {
+      existingKeys.insert(it.key());
+    }
+
+    for (const QString& staleKey : existingKeys - desiredKeys) {
+      const auto stale = m_streamBindings.value(staleKey);
+      try {
+        m_room->clearOnVideoFrameCallback(stale.identity.toStdString(), stale.source);
+      } catch (...) {
+      }
+      m_streamBindings.remove(staleKey);
+      {
+        QMutexLocker tileLocker(&m_remoteState->mutex);
+        m_remoteState->tiles.remove(staleKey);
+      }
+    }
   }
 
-  for (const QString& staleKey : existingKeys - desiredKeys) {
-    const auto stale = m_streamBindings.value(staleKey);
-    try {
-      m_room->clearOnVideoFrameCallback(stale.identity.toStdString(), stale.source);
-    } catch (...) {
+  // 清理"孤儿 tile"：由 onTrackSubscribed 自建但帧回调已被 delegate 清掉的
+  // 残留 tile。这些 tile 不在 m_streamBindings 也不在 desiredKeys 中。
+  {
+    QSet<QString> orphanKeys;
+    {
+      QMutexLocker bindLocker(&m_streamBindingsMutex);
+      QMutexLocker stateLocker(&m_remoteState->mutex);
+      for (auto it = m_remoteState->tiles.cbegin();
+           it != m_remoteState->tiles.cend(); ++it) {
+        if (it.value().sourceText == "无视频流") continue;
+        if (it.value().isLocal) continue;
+        if (!m_streamBindings.contains(it.key()) &&
+            !desiredKeys.contains(it.key())) {
+          orphanKeys.insert(it.key());
+        }
+      }
     }
-    m_streamBindings.remove(staleKey);
-    QMutexLocker locker(&m_remoteState->mutex);
-    m_remoteState->tiles.remove(staleKey);
+    if (!orphanKeys.isEmpty()) {
+      QMutexLocker stateLocker(&m_remoteState->mutex);
+      for (const QString& key : orphanKeys) {
+        m_remoteState->tiles.remove(key);
+      }
+    }
+  }
+
+  // 帧时效检测：对曾活跃参与者，3 秒无帧 → 清除回调+绑定+tile；
+  // 对未曾活跃的，仅清 dataUrl。补偿 SDK 断开通知延迟。
+  {
+    const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+    struct Removal {
+      QString key;
+      QString identity;
+    };
+    QList<Removal> removals;
+
+    {
+      QMutexLocker stateLocker(&m_remoteState->mutex);
+      for (auto it = m_remoteState->tiles.begin();
+           it != m_remoteState->tiles.end(); ++it) {
+        if (it.value().isLocal) continue;
+        if (it.value().lastFrameMs == 0) continue;
+        if (nowMs - it.value().lastFrameMs <= 3000) continue;
+
+        if (m_remoteIdsHadTracks.contains(it.value().identity)) {
+          removals.push_back({it.key(), it.value().identity});
+        } else {
+          it.value().dataUrl.clear();
+        }
+      }
+    }
+
+    // 以下操作不再持有 m_remoteState->mutex，遵循锁顺序
+    for (const auto& r : removals) {
+      try {
+        m_room->clearOnVideoFrameCallback(
+            r.identity.toStdString(), livekit::TrackSource::SOURCE_CAMERA);
+      } catch (...) {}
+      try {
+        m_room->clearOnVideoFrameCallback(
+            r.identity.toStdString(),
+            livekit::TrackSource::SOURCE_SCREENSHARE);
+      } catch (...) {}
+    }
+    if (!removals.isEmpty()) {
+      {
+        QMutexLocker bindLocker(&m_streamBindingsMutex);
+        for (const auto& r : removals) {
+          m_streamBindings.remove(r.key);
+        }
+      }
+      QMutexLocker stateLocker(&m_remoteState->mutex);
+      for (const auto& r : removals) {
+        m_remoteState->tiles.remove(r.key);
+      }
+    }
   }
 
   livekit::VideoStream::Options options;
@@ -822,6 +1039,14 @@ void LiveKitRoomService::refreshRemoteState() {
   std::weak_ptr<RemoteState> weakState = m_remoteState;
   for (auto it = desiredBindings.begin(); it != desiredBindings.end(); ++it) {
     const auto binding = it.value();
+
+    {
+      QMutexLocker locker(&m_streamBindingsMutex);
+      if (m_streamBindings.contains(binding.key)) {
+        continue;
+      }
+    }
+
     {
       QMutexLocker locker(&m_remoteState->mutex);
       auto& tile = m_remoteState->tiles[binding.key];
@@ -830,10 +1055,6 @@ void LiveKitRoomService::refreshRemoteState() {
       tile.displayName = binding.displayName;
       tile.sourceText = trackSourceLabel(binding.source);
       tile.isLocal = binding.isLocal;
-    }
-
-    if (m_streamBindings.contains(binding.key)) {
-      continue;
     }
 
     m_room->setOnVideoFrameCallback(
@@ -868,10 +1089,10 @@ void LiveKitRoomService::refreshRemoteState() {
           if (!buffer.open(QIODevice::WriteOnly)) {
             return;
           }
-          const QImage scaled = image.width() > 1600
-                                    ? image.copy().scaledToWidth(1600, Qt::SmoothTransformation)
+          const QImage scaled = image.width() > 1280
+                                    ? image.copy().scaledToWidth(1280, Qt::SmoothTransformation)
                                     : image.copy();
-          if (!scaled.save(&buffer, "JPEG", 88)) {
+          if (!scaled.save(&buffer, "JPEG", 75)) {
             return;
           }
 
@@ -885,7 +1106,10 @@ void LiveKitRoomService::refreshRemoteState() {
         },
         options);
 
-    m_streamBindings.insert(binding.key, binding);
+    {
+      QMutexLocker locker(&m_streamBindingsMutex);
+      m_streamBindings.insert(binding.key, binding);
+    }
   }
 
   {
@@ -951,3 +1175,218 @@ QString LiveKitRoomService::remoteVideoSourceText() const {
 }
 
 QString LiveKitRoomService::lastError() const { return m_lastError; }
+
+// ---------------------------------------------------------------------------
+// livekit::RoomDelegate — event-driven, fire from SDK thread
+// ---------------------------------------------------------------------------
+
+void LiveKitRoomService::onParticipantConnected(
+    livekit::Room&, const livekit::ParticipantConnectedEvent& event) {
+  if (!event.participant) {
+    return;
+  }
+  QMetaObject::invokeMethod(this, "doHandleParticipantConnected",
+                            Qt::QueuedConnection);
+}
+
+void LiveKitRoomService::onParticipantDisconnected(
+    livekit::Room&, const livekit::ParticipantDisconnectedEvent& event) {
+  if (!event.participant) {
+    return;
+  }
+  const QString identity =
+      QString::fromStdString(event.participant->identity());
+  QMetaObject::invokeMethod(this, "doHandleParticipantDisconnected",
+                            Qt::QueuedConnection, Q_ARG(QString, identity));
+}
+
+void LiveKitRoomService::onTrackUnpublished(
+    livekit::Room&, const livekit::TrackUnpublishedEvent& event) {
+  if (!event.participant || !event.publication) {
+    return;
+  }
+  const QString identity =
+      QString::fromStdString(event.participant->identity());
+  const auto source = event.publication->source();
+  QMetaObject::invokeMethod(this, "doHandleTrackUnpublished",
+                            Qt::QueuedConnection, Q_ARG(QString, identity),
+                            Q_ARG(livekit::TrackSource, source));
+}
+
+void LiveKitRoomService::onTrackSubscribed(
+    livekit::Room&, const livekit::TrackSubscribedEvent& event) {
+  if (!event.participant || !event.publication || !event.track) {
+    return;
+  }
+  if (event.track->kind() != livekit::TrackKind::KIND_VIDEO) {
+    return;
+  }
+  const auto source = event.publication->source();
+  if (source != livekit::TrackSource::SOURCE_CAMERA &&
+      source != livekit::TrackSource::SOURCE_SCREENSHARE) {
+    return;
+  }
+  if (event.publication->muted()) {
+    return;
+  }
+
+  const QString identity =
+      QString::fromStdString(event.participant->identity());
+  QString name = QString::fromStdString(event.participant->name());
+  if (name.isEmpty()) name = identity;
+  const QString key = streamKey(identity, source);
+  const QString sourceLabel = trackSourceLabel(source);
+
+  // 原子地检查是否已有绑定，避免与 refreshRemoteState() 竞争导致重复注册。
+  {
+    QMutexLocker locker(&m_streamBindingsMutex);
+    if (m_streamBindings.contains(key)) {
+      return;  // 已由 refreshRemoteState 注册过
+    }
+
+    StreamBinding binding;
+    binding.key = key;
+    binding.identity = identity;
+    binding.displayName = name;
+    binding.source = source;
+    binding.isLocal = false;
+    m_streamBindings.insert(key, binding);
+  }
+
+  // 在 SDK 线程直接注册帧回调，避免 QueuedConnection 排队期间帧丢失。
+  livekit::VideoStream::Options opts;
+  opts.capacity = 4;
+  opts.format = livekit::VideoBufferType::RGBA;
+
+  std::weak_ptr<RemoteState> weakState = m_remoteState;
+  m_room->setOnVideoFrameCallback(
+      identity.toStdString(), source,
+      [weakState, key, identity, name, sourceLabel]
+      (const livekit::VideoFrame& frame, std::int64_t) {
+        const auto state = weakState.lock();
+        if (!state || frame.width() <= 0 || frame.height() <= 0 ||
+            frame.dataSize() == 0) {
+          return;
+        }
+
+        const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
+        {
+          QMutexLocker locker(&state->mutex);
+          auto& tile = state->tiles[key];
+          if (tile.tileId.isEmpty()) {
+            tile.tileId = key;
+            tile.identity = identity;
+            tile.displayName = name;
+            tile.sourceText = sourceLabel;
+            tile.isLocal = false;
+          }
+          if (nowMs - tile.lastFrameMs < kPreviewUpdateIntervalMs) {
+            return;
+          }
+          tile.lastFrameMs = nowMs;
+        }
+
+        const QImage image(frame.data(), frame.width(), frame.height(),
+                           QImage::Format_RGBA8888);
+        if (image.isNull()) return;
+
+        QByteArray pngBytes;
+        QBuffer buffer(&pngBytes);
+        if (!buffer.open(QIODevice::WriteOnly)) return;
+        const QImage scaled =
+            image.width() > 1280
+                ? image.copy().scaledToWidth(1280, Qt::SmoothTransformation)
+                : image.copy();
+        if (!scaled.save(&buffer, "JPEG", 75)) return;
+
+        const QString dataUrl =
+            "data:image/jpeg;base64," +
+            QString::fromLatin1(pngBytes.toBase64());
+        QMutexLocker locker(&state->mutex);
+        state->tiles[key].dataUrl = dataUrl;
+      },
+      opts);
+
+  // UI 刷新推迟到主线程
+  QMetaObject::invokeMethod(this, "doHandleTrackSubscribed",
+                            Qt::QueuedConnection);
+}
+
+// ---------------------------------------------------------------------------
+// Private slots — always run on Qt main thread
+// ---------------------------------------------------------------------------
+
+void LiveKitRoomService::doHandleParticipantConnected() {
+  if (!m_connected || !m_room) {
+    return;
+  }
+  // 新参与者加入时立即刷新远端状态，确保无视频轨的用户也能实时出现占位 tile，
+  // 无需等待下一次 80ms 轮询。
+  refreshRemoteState();
+  emit remoteStateDirty();
+}
+
+void LiveKitRoomService::doHandleParticipantDisconnected(
+    const QString& identity) {
+  if (!m_connected || !m_room) {
+    return;
+  }
+  // 立即清除 SDK 侧帧回调（可能由 onTrackSubscribed 直接注册，尚未记入
+  // m_streamBindings），但保留 m_streamBindings 让 refreshRemoteState() 做最终清理。
+  try {
+    m_room->clearOnVideoFrameCallback(identity.toStdString(),
+                                      livekit::TrackSource::SOURCE_CAMERA);
+  } catch (...) {
+  }
+  try {
+    m_room->clearOnVideoFrameCallback(identity.toStdString(),
+                                      livekit::TrackSource::SOURCE_SCREENSHARE);
+  } catch (...) {
+  }
+
+  {
+    QMutexLocker locker(&m_remoteState->mutex);
+    for (auto it = m_remoteState->tiles.begin();
+         it != m_remoteState->tiles.end();) {
+      if (it.value().identity == identity) {
+        it = m_remoteState->tiles.erase(it);
+      } else {
+        ++it;
+      }
+    }
+  }
+
+  emit remoteStateDirty();
+}
+
+void LiveKitRoomService::doHandleTrackUnpublished(
+    const QString& identity, livekit::TrackSource source) {
+  if (!m_connected || !m_room) {
+    return;
+  }
+  const QString key = streamKey(identity, source);
+
+  // 立即清除 SDK 侧帧回调（onTrackSubscribed 中直接注册的），
+  // 但保留 m_streamBindings 让 refreshRemoteState() 做最终清理。
+  try {
+    m_room->clearOnVideoFrameCallback(identity.toStdString(), source);
+  } catch (...) {
+  }
+
+  {
+    QMutexLocker locker(&m_remoteState->mutex);
+    m_remoteState->tiles.remove(key);
+  }
+
+  emit remoteStateDirty();
+}
+
+void LiveKitRoomService::doHandleTrackSubscribed() {
+  if (!m_connected || !m_room) {
+    return;
+  }
+  // 强制即时刷新远端状态，确保新订阅的轨道（尤其是先入会者已发布的
+  // 屏幕共享）能在订阅完成的当下就开始接收帧回调。
+  refreshRemoteState();
+  emit remoteStateDirty();
+}

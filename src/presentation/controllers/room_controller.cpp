@@ -41,6 +41,9 @@ RoomController::RoomController(IRoomService* roomService, IDeviceService* device
   connect(&m_remoteRefreshTimer, &QTimer::timeout, this,
           &RoomController::refreshRemoteDisplayState);
   m_remoteRefreshTimer.start();
+
+  connect(m_roomService, &IRoomService::remoteStateDirty, this,
+          &RoomController::refreshRemoteDisplayState);
 }
 
 bool RoomController::micEnabled() const { return m_micEnabled; }
@@ -174,13 +177,13 @@ void RoomController::selectAudioOutput(const QString& deviceId) {
 
 void RoomController::resetSessionUiState() {
   bool changed = false;
-  if (m_micEnabled != true) {
-    m_micEnabled = true;
+  if (m_micEnabled != false) {
+    m_micEnabled = false;
     emit micEnabledChanged();
     changed = true;
   }
-  if (m_cameraEnabled != true) {
-    m_cameraEnabled = true;
+  if (m_cameraEnabled != false) {
+    m_cameraEnabled = false;
     emit cameraEnabledChanged();
     changed = true;
   }

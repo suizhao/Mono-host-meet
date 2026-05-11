@@ -1,6 +1,7 @@
 #pragma once
 
 #include "domain/services/room_service.h"
+#include <livekit/room_delegate.h>
 #include <livekit/track.h>
 
 #include <QHash>
@@ -19,7 +20,8 @@ class LocalVideoTrack;
 class VideoSource;
 }
 
-class LiveKitRoomService : public IRoomService {
+class LiveKitRoomService : public IRoomService, public livekit::RoomDelegate {
+  Q_OBJECT
 public:
   LiveKitRoomService();
   ~LiveKitRoomService() override;
@@ -42,6 +44,25 @@ public:
   QVariantList remoteVideoTiles() const override;
   QString remoteVideoSourceText() const override;
   QString lastError() const override;
+
+  // livekit::RoomDelegate — event-driven updates
+  void onParticipantConnected(
+      livekit::Room&,
+      const livekit::ParticipantConnectedEvent& event) override;
+  void onParticipantDisconnected(
+      livekit::Room&,
+      const livekit::ParticipantDisconnectedEvent& event) override;
+  void onTrackUnpublished(livekit::Room&,
+                          const livekit::TrackUnpublishedEvent& event) override;
+  void onTrackSubscribed(livekit::Room&,
+                         const livekit::TrackSubscribedEvent& event) override;
+
+private slots:
+  void doHandleParticipantConnected();
+  void doHandleParticipantDisconnected(const QString& identity);
+  void doHandleTrackUnpublished(const QString& identity,
+                                livekit::TrackSource source);
+  void doHandleTrackSubscribed();
 
 private:
   struct StreamBinding {
@@ -76,6 +97,8 @@ private:
   QString m_lastError;
   std::shared_ptr<RemoteState> m_remoteState = std::make_shared<RemoteState>();
   QHash<QString, StreamBinding> m_streamBindings;
+  mutable QMutex m_streamBindingsMutex;
+  QSet<QString> m_remoteIdsHadTracks;
 
   std::shared_ptr<livekit::VideoSource> m_screenShareSource;
   std::shared_ptr<livekit::LocalVideoTrack> m_screenShareTrack;
