@@ -1,0 +1,7 @@
+<RCC>
+  <qresource prefix="/qt/qml/MultiLive/">
+    <file alias="src/presentation/qml/App.qml">E:/MultiLive/src/presentation/qml/App.qml</file>
+    <file alias="src/presentation/qml/pages/HomePage.qml">E:/MultiLive/src/presentation/qml/pages/HomePage.qml</file>
+  </qresource>
+</RCC>
+

@@ -1,16 +1,16 @@
 import QtQuick
-import QtQuick.Window
 import QtQuick.Controls
 
-Window {
+ApplicationWindow {
     id: root
-    width: 1000
-    height: 680
+    width: 1280
+    height: 840
     visible: true
-    title: qsTr("MultiLive MVP")
+    title: "MultiLive MVP"
 
-    HomePage {
+    StackView {
+        id: stackView
         anchors.fill: parent
-        homeController: appContext.homeController
+        initialItem: HomePage { }
     }
 }

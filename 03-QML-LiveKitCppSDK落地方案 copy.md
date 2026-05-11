@@ -2,14 +2,27 @@
 
 ## 1. 前提与目标
 - 前提：QML 方案使用 **LiveKit C++ 预构建 SDK**（不是纯自研 RTC 协议栈）。
+- **信令与媒体服务**：以 **Docker 部署的自建 LiveKit Server** 为唯一后端，**不依赖 LiveKit Cloud**。
 - 目标：快速复刻当前仓库业务行为（入会、会中、设置、录制、离会），并为后续扩展保留清晰边界。
 
-## 2. 架构原则
+## 2. 部署前提：Docker 自建 LiveKit Server（非 Cloud）
+
+| 项目 | 说明 |
+|------|------|
+| `LIVEKIT_URL` | 自建服务的 WebSocket 入口，一般为 **`wss://<主机或域名>:<端口>`**，与 Cloud 托管地址无关。 |
+| Token 签发 | 仍使用 **与 Docker 内 LiveKit 一致的 API Key/Secret**（`livekit-server-sdk` 或等价签发），JWT 格式不变。 |
+| `region` | 原 Web 仓库的 `getLiveKitURL()` 仅改写 **`*.livekit.cloud`**；自建场景通常 **忽略 region**，除非你自行做多机房路由。 |
+| C++ SDK 连接 | `serverUrl` 指向自建 **`wss://...`**；确保客户端网络可达（防火墙、TLS 证书、反向代理 WebSocket 升级）。 |
+| 录制 | `record/start|stop` 对接的是你自建栈里的 **Egress**（常与 LiveKit 同 Compose 或分离部署），不是 Cloud 侧录制。 |
+
+联调顺序建议：Docker 启动 LiveKit → 配置签发服务使用的 `LIVEKIT_*` → QML 客户端连自建 `wss` → 再打通 HTTP API。
+
+## 3. 架构原则
 - UI 与 RTC 解耦：QML 只消费 `Controller/ViewModel`，不直接操作 SDK。
 - 网络契约复用现有后端：`/api/connection-details`、`/api/record/start|stop`。
 - 先做最小可用（MVP），再补高级能力（E2EE、性能优化、调试可观测）。
 
-## 3. 目录结构建议
+## 4. 目录结构建议
 ```text
 qml_meet/
 ├─ CMakeLists.txt
@@ -48,7 +61,7 @@ qml_meet/
 └─ resources/
 ```
 
-## 4. 模块边界（必须保持）
+## 5. 模块边界（必须保持）
 - `presentation`：页面与交互逻辑。
 - `domain/services`：抽象业务能力接口。
 - `infra/http`：后端 API 请求与响应解析。
@@ -56,7 +69,7 @@ qml_meet/
 - `infra/device`：设备枚举与设备切换。
 - `app`：配置与依赖注入。
 
-## 5. 关键接口（建议）
+## 6. 关键接口（建议）
 
 ```cpp
 class IBackendService {
@@ -103,7 +116,7 @@ public:
 };
 ```
 
-## 6. 页面流程（与原仓库对齐）
+## 7. 页面流程（与原仓库对齐）
 - `HomePage.qml`
   - Demo：生成 roomId，进入 PreJoin。
   - Custom：输入 `liveKitUrl + token`，直接进入 Room。
@@ -116,7 +129,7 @@ public:
   - 工具栏：麦克风、摄像头、设置、离会。
   - 设置：设备切换、录制启停。
 
-## 7. LiveKit C++ SDK 接入关注点
+## 8. LiveKit C++ SDK 接入关注点
 - 连接生命周期：
   - `connect` 成功后才能允许会中控制。
   - 断开事件触发时返回首页并释放资源。
@@ -129,14 +142,14 @@ public:
 - 错误模型：
   - SDK 错误码映射为业务错误类型，保证提示文案稳定。
 
-## 8. E2EE 与性能优化（分阶段）
+## 9. E2EE 与性能优化（分阶段）
 - MVP 阶段：
   - E2EE 接口先预留字段（`e2eePassphrase`），能力可按 SDK 支持逐步接入。
   - 性能策略先做基础监控与手动降档。
 - 增强阶段：
   - 对齐 Web 方案：连接前注入密钥、失败提示、低功耗自动降级。
 
-## 9. 迭代计划（每项可单 PR）
+## 10. 迭代计划（每项可单 PR）
 1. 项目骨架与依赖注入
 2. 后端 API 客户端（connection-details + record）
 3. LiveKit C++ SDK 基础 connect/disconnect
@@ -148,7 +161,7 @@ public:
 9. E2EE 接口打通（按 SDK 能力）
 10. 性能优化与回归测试
 
-## 10. 验收标准
+## 11. 验收标准
 - 可跑通 Demo 与 Custom 两条入会路径。
 - `connection-details` 契约字段完全一致。
 - 麦克风/摄像头/设备切换能力可用。

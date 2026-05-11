@@ -1,55 +1,41 @@
 #pragma once
 
-#include <QObject>
+#include "app/env_config.h"
+#include "presentation/controllers/home_controller.h"
+#include "presentation/controllers/prejoin_controller.h"
+#include "presentation/controllers/room_controller.h"
 
+#include <QObject>
 #include <memory>
 
-namespace app {
-class EnvConfig;
-}
-
-namespace infra::http {
+class IBackendService;
+class IRoomService;
+class IDeviceService;
 class BackendServiceQt;
-}
-
-namespace infra::rtc {
 class LiveKitRoomService;
-}
-
-namespace infra::device {
 class DeviceServiceQt;
-}
+class FrameImageProvider;
 
-namespace presentation::controllers {
-class HomeController;
-class PrejoinController;
-class RoomController;
-}
-
-namespace app {
-
-class AppContext final : public QObject {
-    Q_OBJECT
-    Q_PROPERTY(QObject* homeController READ homeController CONSTANT)
-    Q_PROPERTY(QObject* prejoinController READ prejoinController CONSTANT)
-    Q_PROPERTY(QObject* roomController READ roomController CONSTANT)
+class AppContext : public QObject {
+  Q_OBJECT
+  Q_PROPERTY(HomeController* homeController READ homeController CONSTANT)
+  Q_PROPERTY(PrejoinController* prejoinController READ prejoinController CONSTANT)
+  Q_PROPERTY(RoomController* roomController READ roomController CONSTANT)
 
 public:
-    explicit AppContext(QObject* parent = nullptr);
-    ~AppContext() override;
+  explicit AppContext(FrameImageProvider* frameImageProvider, QObject* parent = nullptr);
+  ~AppContext() override;
 
-    [[nodiscard]] QObject* homeController() const;
-    [[nodiscard]] QObject* prejoinController() const;
-    [[nodiscard]] QObject* roomController() const;
+  HomeController* homeController() const;
+  PrejoinController* prejoinController() const;
+  RoomController* roomController() const;
 
 private:
-    std::unique_ptr<EnvConfig> envConfig_;
-    std::unique_ptr<infra::http::BackendServiceQt> backendService_;
-    std::unique_ptr<infra::rtc::LiveKitRoomService> roomService_;
-    std::unique_ptr<infra::device::DeviceServiceQt> deviceService_;
-    std::unique_ptr<presentation::controllers::HomeController> homeController_;
-    std::unique_ptr<presentation::controllers::PrejoinController> prejoinController_;
-    std::unique_ptr<presentation::controllers::RoomController> roomController_;
+  EnvConfig m_envConfig;
+  std::unique_ptr<BackendServiceQt> m_backendService;
+  std::unique_ptr<LiveKitRoomService> m_roomService;
+  std::unique_ptr<DeviceServiceQt> m_deviceService;
+  std::unique_ptr<HomeController> m_homeController;
+  std::unique_ptr<PrejoinController> m_prejoinController;
+  std::unique_ptr<RoomController> m_roomController;
 };
-
-}  // namespace app

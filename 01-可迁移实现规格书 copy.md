@@ -120,6 +120,7 @@
 ## 8. 迁移映射建议（QML / Flutter）
 - Flutter：优先复用 LiveKit 客户端生态，快速还原业务行为。
 - QML：使用 LiveKit C++ 预构建 SDK 作为 RTC 层，UI 与状态管理按 Qt/QML 重建。
+- **若目标部署为 Docker 自建 LiveKit Server（非 LiveKit Cloud）**：`LIVEKIT_URL` 指向自建 `wss://...`；`region` 相关逻辑（仅对 `livekit.cloud` 主机名生效）在自建场景通常可忽略；详见 `02-Flutter落地方案.md`、`03-QML-LiveKitCppSDK落地方案.md` 中的部署前提。
 - 两端共同原则：先行为等价，再样式等价，再做增强能力（调试、性能、可观测性）。
 
 ## 9. 明确的演示用 / 待改进点

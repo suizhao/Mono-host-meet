@@ -1,0 +1,7 @@
+<RCC>
+  <qresource prefix="/qt/qml/MultiLive/">
+    <file alias="src/presentation/qml/qmldir">E:/MultiLive/build/Desktop_Qt_6_11_0_MSVC2022_64bit-Release/MultiLive/src/presentation/qml/qmldir</file>
+    <file alias="src/presentation/qml/pages/qmldir">E:/MultiLive/build/Desktop_Qt_6_11_0_MSVC2022_64bit-Release/MultiLive/src/presentation/qml/pages/qmldir</file>
+  </qresource>
+</RCC>
+

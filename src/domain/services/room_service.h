@@ -1,25 +1,28 @@
 #pragma once
 
 #include <QString>
-
-namespace domain::services {
+#include <QVariantList>
 
 class IRoomService {
 public:
-    virtual ~IRoomService() = default;
+  virtual ~IRoomService() = default;
 
-    virtual void connect(
-        const QString& serverUrl,
-        const QString& token,
-        bool audioEnabled,
-        bool videoEnabled,
-        const QString& audioDeviceId = QString(),
-        const QString& videoDeviceId = QString(),
-        const QString& e2eePassphrase = QString()) = 0;
-
-    virtual void disconnect() = 0;
-    virtual void setMicEnabled(bool enabled) = 0;
-    virtual void setCameraEnabled(bool enabled) = 0;
+  virtual bool connect(const QString& serverUrl,
+                       const QString& token,
+                       bool audioEnabled,
+                       bool videoEnabled,
+                       const QString& audioDeviceId = "",
+                       const QString& videoDeviceId = "",
+                       const QString& e2eePassphrase = "") = 0;
+  virtual void disconnect() = 0;
+  virtual bool setMicEnabled(bool enabled) = 0;
+  virtual bool setCameraEnabled(bool enabled) = 0;
+  virtual bool setScreenShareEnabled(bool enabled) = 0;
+  virtual bool screenShareEnabled() const = 0;
+  virtual void refreshRemoteState() = 0;
+  virtual QString remoteParticipantsText() const = 0;
+  virtual QString remoteVideoDataUrl() const = 0;
+  virtual QVariantList remoteVideoTiles() const = 0;
+  virtual QString remoteVideoSourceText() const = 0;
+  virtual QString lastError() const = 0;
 };
-
-}  // namespace domain::services
