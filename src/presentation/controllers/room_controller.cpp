@@ -110,6 +110,14 @@ void RoomController::toggleCamera() {
     return;
   }
 
+  // 打开摄像头时自动打开麦克风（反之不自动）
+  if (nextState && !m_micEnabled) {
+    if (m_roomService->setMicEnabled(true)) {
+      m_micEnabled = true;
+      emit micEnabledChanged();
+    }
+  }
+
   m_cameraEnabled = nextState;
   setTrackError("");
   refreshDisplayTexts();
@@ -352,6 +360,32 @@ void RoomController::refreshRemoteDisplayState() {
   if (oldHasRemoteVideo != hasRemoteVideo()) {
     emit hasRemoteVideoChanged();
   }
+
+  // PiP：摄像头 + 屏幕共享同时激活时，摄像头画面浮动在共享画面右下角
+  {
+    bool pipVisible = false;
+    QString pipUrl;
+    if (m_cameraEnabled && m_screenShareEnabled) {
+      for (const auto& item : nextLiteTiles) {
+        const QVariantMap map = item.toMap();
+        if (map.value("isLocal").toBool() &&
+            map.value("sourceText").toString() == "摄像头" &&
+            map.value("hasFrame").toBool()) {
+          pipVisible = true;
+          pipUrl = map.value("imageUrl").toString();
+          break;
+        }
+      }
+    }
+    if (m_cameraPipVisible != pipVisible) {
+      m_cameraPipVisible = pipVisible;
+      emit cameraPipVisibleChanged();
+    }
+    if (m_cameraPipImageUrl != pipUrl) {
+      m_cameraPipImageUrl = pipUrl;
+      emit cameraPipImageUrlChanged();
+    }
+  }
 }
 
 void RoomController::setTrackError(const QString& message) {
@@ -366,4 +400,11 @@ void RoomController::setTrackError(const QString& message) {
   if (oldHasError != hasTrackError()) {
     emit trackErrorVisibilityChanged();
   }
+}
+
+bool RoomController::cameraPipVisible() const { return m_cameraPipVisible; }
+QString RoomController::cameraPipImageUrl() const { return m_cameraPipImageUrl; }
+
+void RoomController::hideCameraPip() {
+  toggleCamera();
 }

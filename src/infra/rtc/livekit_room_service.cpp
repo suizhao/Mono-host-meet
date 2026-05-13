@@ -417,6 +417,24 @@ bool LiveKitRoomService::connect(const QString& serverUrl,
 void LiveKitRoomService::disconnect() {
   setScreenShareEnabled(false);
 
+  // Stop mic thread and track
+  m_micActive.store(false);
+  if (m_micThread.joinable()) m_micThread.join();
+  if (m_micTrack && m_room && m_room->localParticipant()) {
+    try { m_room->localParticipant()->unpublishTrack(m_micTrack->sid()); } catch (...) {}
+  }
+  m_micTrack.reset();
+  m_micSource.reset();
+
+  // Stop camera thread and track
+  m_cameraActive.store(false);
+  if (m_cameraThread.joinable()) m_cameraThread.join();
+  if (m_cameraTrack && m_room && m_room->localParticipant()) {
+    try { m_room->localParticipant()->unpublishTrack(m_cameraTrack->sid()); } catch (...) {}
+  }
+  m_cameraTrack.reset();
+  m_cameraSource.reset();
+
   if (m_room) {
     {
       QMutexLocker locker(&m_streamBindingsMutex);
@@ -468,32 +486,34 @@ bool LiveKitRoomService::setMicEnabled(bool enabled) {
     return false;
   }
 
-  const auto publications = m_room->localParticipant()->trackPublications();
-  bool foundAudioTrack = false;
-
-  for (const auto& [sid, publication] : publications) {
-    Q_UNUSED(sid);
-    if (!publication) {
-      continue;
+  if (enabled && !m_micTrack) {
+    // 首次开启：创建 AudioSource + 发布轨 + 静音线程
+    try {
+      m_micSource = std::make_shared<livekit::AudioSource>(48000, 1, 0);
+      m_micTrack = m_room->localParticipant()->publishAudioTrack(
+          "mic-mvp", m_micSource, livekit::TrackSource::SOURCE_MICROPHONE);
+    } catch (const std::exception& ex) {
+      m_lastError = QString("创建麦克风轨道失败: %1").arg(ex.what());
+      return false;
+    } catch (...) {
+      m_lastError = "创建麦克风轨道失败: 未知异常";
+      return false;
     }
+    startMicThread();
+    return true;
+  }
 
-    const auto track = publication->track();
-    if (!track || track->kind() != livekit::TrackKind::KIND_AUDIO) {
-      continue;
-    }
-
-    const auto localAudioTrack =
-        std::dynamic_pointer_cast<livekit::LocalAudioTrack>(track);
-    if (!localAudioTrack) {
-      continue;
-    }
-
-    foundAudioTrack = true;
+  if (m_micTrack) {
     try {
       if (enabled) {
-        localAudioTrack->unmute();
+        m_micTrack->unmute();
+        startMicThread();
       } else {
-        localAudioTrack->mute();
+        m_micTrack->mute();
+        m_micActive.store(false);
+        if (m_micThread.joinable()) {
+          m_micThread.join();
+        }
       }
     } catch (const std::exception& ex) {
       m_lastError = QString("切换麦克风失败: %1").arg(ex.what());
@@ -502,14 +522,11 @@ bool LiveKitRoomService::setMicEnabled(bool enabled) {
       m_lastError = "切换麦克风失败: 未知异常";
       return false;
     }
+    return true;
   }
 
-  if (!foundAudioTrack) {
-    m_lastError = "未找到可控制的本地音频轨道";
-    return false;
-  }
-
-  return true;
+  m_lastError = "未找到可控制的本地音频轨道";
+  return false;
 }
 
 bool LiveKitRoomService::setCameraEnabled(bool enabled) {
@@ -519,32 +536,35 @@ bool LiveKitRoomService::setCameraEnabled(bool enabled) {
     return false;
   }
 
-  const auto publications = m_room->localParticipant()->trackPublications();
-  bool foundVideoTrack = false;
-
-  for (const auto& [sid, publication] : publications) {
-    Q_UNUSED(sid);
-    if (!publication) {
-      continue;
+  if (enabled && !m_cameraTrack) {
+    // 首次开启：创建 VideoSource + 发布摄像头轨 + 测试图案线程
+    try {
+      m_cameraSource = std::make_shared<livekit::VideoSource>(640, 480);
+      m_cameraTrack = m_room->localParticipant()->publishVideoTrack(
+          "camera-mvp", m_cameraSource,
+          livekit::TrackSource::SOURCE_CAMERA);
+    } catch (const std::exception& ex) {
+      m_lastError = QString("创建摄像头轨道失败: %1").arg(ex.what());
+      return false;
+    } catch (...) {
+      m_lastError = "创建摄像头轨道失败: 未知异常";
+      return false;
     }
+    startCameraThread();
+    return true;
+  }
 
-    const auto track = publication->track();
-    if (!track || track->kind() != livekit::TrackKind::KIND_VIDEO) {
-      continue;
-    }
-
-    const auto localVideoTrack =
-        std::dynamic_pointer_cast<livekit::LocalVideoTrack>(track);
-    if (!localVideoTrack) {
-      continue;
-    }
-
-    foundVideoTrack = true;
+  if (m_cameraTrack) {
     try {
       if (enabled) {
-        localVideoTrack->unmute();
+        m_cameraTrack->unmute();
+        startCameraThread();
       } else {
-        localVideoTrack->mute();
+        m_cameraTrack->mute();
+        m_cameraActive.store(false);
+        if (m_cameraThread.joinable()) {
+          m_cameraThread.join();
+        }
       }
     } catch (const std::exception& ex) {
       m_lastError = QString("切换摄像头失败: %1").arg(ex.what());
@@ -553,14 +573,11 @@ bool LiveKitRoomService::setCameraEnabled(bool enabled) {
       m_lastError = "切换摄像头失败: 未知异常";
       return false;
     }
+    return true;
   }
 
-  if (!foundVideoTrack) {
-    m_lastError = "未找到可控制的本地视频轨道";
-    return false;
-  }
-
-  return true;
+  m_lastError = "未找到可控制的本地视频轨道";
+  return false;
 }
 
 bool LiveKitRoomService::setScreenShareEnabled(bool enabled) {
@@ -732,6 +749,59 @@ bool LiveKitRoomService::setScreenShareEnabled(bool enabled) {
 bool LiveKitRoomService::screenShareEnabled() const {
   std::lock_guard<std::mutex> locker(m_screenShareMutex);
   return m_screenShareRunning.load() && (m_screenShareTrack != nullptr);
+}
+
+void LiveKitRoomService::startMicThread() {
+  if (m_micActive.load()) return;
+  m_micActive.store(true);
+  m_micThread = std::thread([this]() {
+    while (m_micActive.load()) {
+      auto frame = livekit::AudioFrame::create(48000, 1, 480);
+      try {
+        m_micSource->captureFrame(frame, 10);
+      } catch (...) {
+      }
+      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+  });
+}
+
+void LiveKitRoomService::startCameraThread() {
+  if (m_cameraActive.load()) return;
+  m_cameraActive.store(true);
+  m_cameraThread = std::thread([this]() {
+    int tick = 0;
+    constexpr int kWidth = 640;
+    constexpr int kHeight = 480;
+    const auto frameInterval = std::chrono::milliseconds(100);
+
+    while (m_cameraActive.load()) {
+      auto frame = livekit::VideoFrame::create(kWidth, kHeight,
+                                               livekit::VideoBufferType::RGBA);
+      std::uint8_t* buf = frame.data();
+      if (buf) {
+        for (int y = 0; y < kHeight; ++y) {
+          for (int x = 0; x < kWidth; ++x) {
+            const int offset = (y * kWidth + x) * 4;
+            buf[offset + 0] = static_cast<std::uint8_t>((x + tick * 2) % 256);
+            buf[offset + 1] = static_cast<std::uint8_t>((y + tick) % 256);
+            buf[offset + 2] = 200;
+            buf[offset + 3] = 255;
+          }
+        }
+      }
+      try {
+        const auto now = std::chrono::steady_clock::now().time_since_epoch();
+        const auto tsUs = std::chrono::duration_cast<std::chrono::microseconds>(
+                              now).count();
+        m_cameraSource->captureFrame(frame, static_cast<std::int64_t>(tsUs),
+                                     livekit::VideoRotation::VIDEO_ROTATION_0);
+      } catch (...) {
+      }
+      ++tick;
+      std::this_thread::sleep_for(frameInterval);
+    }
+  });
 }
 
 void LiveKitRoomService::refreshRemoteState() {

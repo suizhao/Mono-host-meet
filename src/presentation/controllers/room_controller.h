@@ -34,6 +34,8 @@ class RoomController : public QObject {
   Q_PROPERTY(QVariantList videoInputDevices READ videoInputDevices NOTIFY videoInputDevicesChanged)
   Q_PROPERTY(QVariantList audioOutputDevices READ audioOutputDevices NOTIFY audioOutputDevicesChanged)
   Q_PROPERTY(QString deviceStatusText READ deviceStatusText NOTIFY deviceStatusTextChanged)
+  Q_PROPERTY(bool cameraPipVisible READ cameraPipVisible NOTIFY cameraPipVisibleChanged)
+  Q_PROPERTY(QString cameraPipImageUrl READ cameraPipImageUrl NOTIFY cameraPipImageUrlChanged)
 
 public:
   explicit RoomController(IRoomService* roomService, IDeviceService* deviceService,
@@ -60,6 +62,8 @@ public:
   QVariantList videoInputDevices() const;
   QVariantList audioOutputDevices() const;
   QString deviceStatusText() const;
+  bool cameraPipVisible() const;
+  QString cameraPipImageUrl() const;
 
   Q_INVOKABLE void toggleMic();
   Q_INVOKABLE void toggleCamera();
@@ -69,6 +73,7 @@ public:
   Q_INVOKABLE void selectVideoInput(const QString& deviceId);
   Q_INVOKABLE void selectAudioOutput(const QString& deviceId);
   Q_INVOKABLE void resetSessionUiState();
+  Q_INVOKABLE void hideCameraPip();
 
 signals:
   void micEnabledChanged();
@@ -89,6 +94,8 @@ signals:
   void videoInputDevicesChanged();
   void audioOutputDevicesChanged();
   void deviceStatusTextChanged();
+  void cameraPipVisibleChanged();
+  void cameraPipImageUrlChanged();
 
 private:
   void refreshDisplayTexts();
@@ -117,4 +124,7 @@ private:
   QVariantList m_audioOutputDevices;
   QString m_deviceStatusText = "设备状态：未选择";
   QTimer m_remoteRefreshTimer;
+
+  bool m_cameraPipVisible = false;
+  QString m_cameraPipImageUrl;
 };

@@ -120,6 +120,52 @@ Page {
                         }
                     }
                 }
+
+                // PiP：摄像头小窗浮动在屏幕共享右下角
+                Rectangle {
+                    visible: roomController.cameraPipVisible
+                    anchors.right: parent.right
+                    anchors.rightMargin: 12
+                    anchors.bottom: parent.bottom
+                    anchors.bottomMargin: 12
+                    width: 160
+                    height: 120
+                    color: "#20242c"
+                    radius: 6
+                    border.width: 1
+                    border.color: "#4CAF50"
+                    z: 10
+
+                    Image {
+                        anchors.fill: parent
+                        anchors.margins: 1
+                        source: roomController.cameraPipImageUrl
+                        cache: false
+                        fillMode: Image.PreserveAspectFit
+                    }
+
+                    Rectangle {
+                        anchors.left: parent.left
+                        anchors.right: parent.right
+                        anchors.bottom: parent.bottom
+                        height: 20
+                        color: "#66000000"
+
+                        Label {
+                            anchors.fill: parent
+                            horizontalAlignment: Text.AlignHCenter
+                            verticalAlignment: Text.AlignVCenter
+                            text: "摄像头"
+                            color: "#e8edf8"
+                            font.pixelSize: 10
+                        }
+                    }
+
+                    MouseArea {
+                        anchors.fill: parent
+                        onClicked: roomController.hideCameraPip()
+                    }
+                }
             }
         }
 

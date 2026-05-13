@@ -17,7 +17,9 @@
 namespace livekit {
 class Room;
 class LocalVideoTrack;
+class LocalAudioTrack;
 class VideoSource;
+class AudioSource;
 }
 
 class LiveKitRoomService : public IRoomService, public livekit::RoomDelegate {
@@ -100,6 +102,22 @@ private:
   mutable QMutex m_streamBindingsMutex;
   QSet<QString> m_remoteIdsHadTracks;
 
+  // Mic
+  void startMicThread();
+  void startCameraThread();
+
+  std::shared_ptr<livekit::AudioSource> m_micSource;
+  std::shared_ptr<livekit::LocalAudioTrack> m_micTrack;
+  std::atomic<bool> m_micActive{false};
+  std::thread m_micThread;
+
+  // Camera
+  std::shared_ptr<livekit::VideoSource> m_cameraSource;
+  std::shared_ptr<livekit::LocalVideoTrack> m_cameraTrack;
+  std::atomic<bool> m_cameraActive{false};
+  std::thread m_cameraThread;
+
+  // Screen share
   std::shared_ptr<livekit::VideoSource> m_screenShareSource;
   std::shared_ptr<livekit::LocalVideoTrack> m_screenShareTrack;
   std::atomic<bool> m_screenShareRunning{false};
