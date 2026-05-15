@@ -9,6 +9,8 @@
 #include <QImage>
 #include <QSet>
 
+#include <algorithm>
+
 namespace {
 QImage decodeImageFromDataUrl(const QString& dataUrl) {
   const int comma = dataUrl.indexOf(',');
@@ -44,6 +46,10 @@ RoomController::RoomController(IRoomService* roomService, IDeviceService* device
 
   connect(m_roomService, &IRoomService::remoteStateDirty, this,
           &RoomController::refreshRemoteDisplayState);
+
+  if (auto* dqs = dynamic_cast<QObject*>(m_deviceService)) {
+    connect(dqs, SIGNAL(devicesReady()), this, SLOT(onDevicesReady()));
+  }
 }
 
 bool RoomController::micEnabled() const { return m_micEnabled; }
@@ -90,7 +96,8 @@ QString RoomController::deviceStatusText() const { return m_deviceStatusText; }
 
 void RoomController::toggleMic() {
   const bool nextState = !m_micEnabled;
-  if (!m_roomService->setMicEnabled(nextState)) {
+  const QString deviceId = m_deviceService->selectedAudioInputId();
+  if (!m_roomService->setMicEnabled(nextState, deviceId)) {
     setTrackError(m_roomService->lastError());
     qWarning() << "toggleMic failed:" << m_trackErrorText;
     return;
@@ -108,14 +115,6 @@ void RoomController::toggleCamera() {
     setTrackError(m_roomService->lastError());
     qWarning() << "toggleCamera failed:" << m_trackErrorText;
     return;
-  }
-
-  // 打开摄像头时自动打开麦克风（反之不自动）
-  if (nextState && !m_micEnabled) {
-    if (m_roomService->setMicEnabled(true)) {
-      m_micEnabled = true;
-      emit micEnabledChanged();
-    }
   }
 
   m_cameraEnabled = nextState;
@@ -139,6 +138,11 @@ void RoomController::toggleScreenShare() {
 }
 
 void RoomController::refreshDevices() {
+  // 触发探测（initialize 内部有防重入守卫）
+  if (auto* dqs = dynamic_cast<QObject*>(m_deviceService)) {
+    QMetaObject::invokeMethod(dqs, "initialize", Qt::QueuedConnection);
+  }
+
   const auto nextAudioInputs = m_deviceService->listAudioInputs();
   const auto nextVideoInputs = m_deviceService->listVideoInputs();
   const auto nextAudioOutputs = m_deviceService->listAudioOutputs();
@@ -179,6 +183,7 @@ void RoomController::selectVideoInput(const QString& deviceId) {
 
 void RoomController::selectAudioOutput(const QString& deviceId) {
   m_deviceService->selectAudioOutput(deviceId);
+  m_roomService->setAudioOutputDevice(deviceId);
   m_deviceStatusText = QString("已选择扬声器：%1").arg(deviceId);
   emit deviceStatusTextChanged();
 }
@@ -316,12 +321,14 @@ void RoomController::refreshRemoteDisplayState() {
 
     VideoTileItem modelTile;
     modelTile.tileId = tileId;
+    modelTile.identity = map.value("identity").toString();
     modelTile.displayName = map.value("displayName").toString();
     modelTile.sourceText = map.value("sourceText").toString();
     const QVariant isLocalVariant = map.value("isLocal");
     modelTile.isLocal = isLocalVariant.isValid() ? isLocalVariant.toBool() : false;
     modelTile.hasFrame = hasFrame;
     modelTile.imageUrl = lite.value("imageUrl").toString();
+    modelTile.micActive = map.value("micActive").toBool();
     modelTiles.push_back(modelTile);
   }
 
@@ -333,6 +340,54 @@ void RoomController::refreshRemoteDisplayState() {
       it = m_tileFrameVersions.erase(it);
     } else {
       ++it;
+    }
+  }
+
+  // 去重与画中画：按 identity 聚合，同一参与者最多一个 tile
+  {
+    // 收集有真实视频轨的 identity（摄像头或屏幕共享）
+    QSet<QString> identitiesWithVideo;
+    for (const auto& tile : modelTiles) {
+      if (tile.sourceText == "摄像头" || tile.sourceText == "屏幕共享") {
+        identitiesWithVideo.insert(tile.identity);
+      }
+    }
+
+    // 移除多余 tile：有视频轨的参与者不再保留占位 tile
+    QList<int> indicesToRemove;
+    for (int i = 0; i < modelTiles.size(); ++i) {
+      if (modelTiles[i].sourceText == "无视频流" &&
+          identitiesWithVideo.contains(modelTiles[i].identity)) {
+        indicesToRemove.append(i);
+      }
+    }
+    std::sort(indicesToRemove.begin(), indicesToRemove.end(),
+              std::greater<int>());
+    for (int idx : indicesToRemove) {
+      modelTiles.removeAt(idx);
+    }
+
+    // 画中画：同一参与者的摄像头+屏幕共享同时存在时，摄像头嵌入屏幕共享 tile 右下角
+    QList<int> cameraIndicesToRemove;
+    for (int si = 0; si < modelTiles.size(); ++si) {
+      if (modelTiles[si].sourceText != "屏幕共享") continue;
+      const QString& shareIdentity = modelTiles[si].identity;
+      if (shareIdentity.isEmpty()) continue;
+      for (int ci = 0; ci < modelTiles.size(); ++ci) {
+        if (ci == si) continue;
+        if (modelTiles[ci].sourceText == "摄像头" &&
+            modelTiles[ci].identity == shareIdentity) {
+          modelTiles[si].pipImageUrl = modelTiles[ci].imageUrl;
+          modelTiles[si].pipVisible = true;
+          cameraIndicesToRemove.append(ci);
+          break;
+        }
+      }
+    }
+    std::sort(cameraIndicesToRemove.begin(), cameraIndicesToRemove.end(),
+              std::greater<int>());
+    for (int idx : cameraIndicesToRemove) {
+      modelTiles.removeAt(idx);
     }
   }
 
@@ -361,31 +416,6 @@ void RoomController::refreshRemoteDisplayState() {
     emit hasRemoteVideoChanged();
   }
 
-  // PiP：摄像头 + 屏幕共享同时激活时，摄像头画面浮动在共享画面右下角
-  {
-    bool pipVisible = false;
-    QString pipUrl;
-    if (m_cameraEnabled && m_screenShareEnabled) {
-      for (const auto& item : nextLiteTiles) {
-        const QVariantMap map = item.toMap();
-        if (map.value("isLocal").toBool() &&
-            map.value("sourceText").toString() == "摄像头" &&
-            map.value("hasFrame").toBool()) {
-          pipVisible = true;
-          pipUrl = map.value("imageUrl").toString();
-          break;
-        }
-      }
-    }
-    if (m_cameraPipVisible != pipVisible) {
-      m_cameraPipVisible = pipVisible;
-      emit cameraPipVisibleChanged();
-    }
-    if (m_cameraPipImageUrl != pipUrl) {
-      m_cameraPipImageUrl = pipUrl;
-      emit cameraPipImageUrlChanged();
-    }
-  }
 }
 
 void RoomController::setTrackError(const QString& message) {
@@ -402,9 +432,4 @@ void RoomController::setTrackError(const QString& message) {
   }
 }
 
-bool RoomController::cameraPipVisible() const { return m_cameraPipVisible; }
-QString RoomController::cameraPipImageUrl() const { return m_cameraPipImageUrl; }
 
-void RoomController::hideCameraPip() {
-  toggleCamera();
-}

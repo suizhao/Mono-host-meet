@@ -65,6 +65,7 @@ target_link_libraries(appMultiLive
     Qt6::Quick
     Qt6::Qml
     Qt6::Network
+    Qt6::Multimedia
     LiveKit::livekit
 )
 

@@ -18,7 +18,9 @@ public:
                        const QString& videoDeviceId = "",
                        const QString& e2eePassphrase = "") = 0;
   virtual void disconnect() = 0;
-  virtual bool setMicEnabled(bool enabled) = 0;
+  virtual void setAudioOutputDevice(const QString& deviceId) = 0;
+  virtual bool setMicEnabled(bool enabled,
+                              const QString& audioDeviceId = "") = 0;
   virtual bool setCameraEnabled(bool enabled) = 0;
   virtual bool setScreenShareEnabled(bool enabled) = 0;
   virtual bool screenShareEnabled() const = 0;

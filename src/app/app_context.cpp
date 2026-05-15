@@ -21,6 +21,9 @@ AppContext::AppContext(FrameImageProvider* frameImageProvider, QObject* parent)
   m_prejoinController = std::make_unique<PrejoinController>(nullptr);
   m_roomController = std::make_unique<RoomController>(m_roomService.get(), m_deviceService.get(),
                                                       frameImageProvider, nullptr);
+
+  // 启动时异步探测设备，不阻塞 UI 加载
+  m_deviceService->initialize();
 }
 
 AppContext::~AppContext() = default;

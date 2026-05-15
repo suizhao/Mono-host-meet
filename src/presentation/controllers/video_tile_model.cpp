@@ -17,6 +17,8 @@ QVariant VideoTileModel::data(const QModelIndex& index, int role) const {
   switch (role) {
     case TileIdRole:
       return tile.tileId;
+    case IdentityRole:
+      return tile.identity;
     case DisplayNameRole:
       return tile.displayName;
     case SourceTextRole:
@@ -27,6 +29,12 @@ QVariant VideoTileModel::data(const QModelIndex& index, int role) const {
       return tile.isLocal;
     case HasFrameRole:
       return tile.hasFrame;
+    case PipImageUrlRole:
+      return tile.pipImageUrl;
+    case PipVisibleRole:
+      return tile.pipVisible;
+    case MicActiveRole:
+      return tile.micActive;
     default:
       return {};
   }
@@ -34,9 +42,12 @@ QVariant VideoTileModel::data(const QModelIndex& index, int role) const {
 
 QHash<int, QByteArray> VideoTileModel::roleNames() const {
   return {
-      {TileIdRole, "tileId"},         {DisplayNameRole, "displayName"},
+      {TileIdRole, "tileId"},         {IdentityRole, "identity"},
+      {DisplayNameRole, "displayName"},
       {SourceTextRole, "sourceText"}, {ImageUrlRole, "imageUrl"},
       {IsLocalRole, "isLocal"},       {HasFrameRole, "hasFrame"},
+      {PipImageUrlRole, "pipImageUrl"}, {PipVisibleRole, "pipVisible"},
+      {MicActiveRole, "micActive"},
   };
 }
 
@@ -59,11 +70,15 @@ void VideoTileModel::syncTiles(const QList<VideoTileItem>& tiles) {
   }
 
   for (int i = 0; i < m_tiles.size(); ++i) {
-    if (m_tiles[i].displayName == tiles[i].displayName &&
+    if (m_tiles[i].identity == tiles[i].identity &&
+        m_tiles[i].displayName == tiles[i].displayName &&
         m_tiles[i].sourceText == tiles[i].sourceText &&
         m_tiles[i].imageUrl == tiles[i].imageUrl &&
         m_tiles[i].isLocal == tiles[i].isLocal &&
-        m_tiles[i].hasFrame == tiles[i].hasFrame) {
+        m_tiles[i].hasFrame == tiles[i].hasFrame &&
+        m_tiles[i].pipImageUrl == tiles[i].pipImageUrl &&
+        m_tiles[i].pipVisible == tiles[i].pipVisible &&
+        m_tiles[i].micActive == tiles[i].micActive) {
       continue;
     }
 

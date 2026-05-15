@@ -6,11 +6,15 @@
 
 struct VideoTileItem {
   QString tileId;
+  QString identity;
   QString displayName;
   QString sourceText;
   QString imageUrl;
+  QString pipImageUrl;
   bool isLocal = false;
   bool hasFrame = false;
+  bool pipVisible = false;
+  bool micActive = false;
 };
 
 class VideoTileModel : public QAbstractListModel {
@@ -19,11 +23,15 @@ class VideoTileModel : public QAbstractListModel {
 public:
   enum Roles {
     TileIdRole = Qt::UserRole + 1,
+    IdentityRole,
     DisplayNameRole,
     SourceTextRole,
     ImageUrlRole,
     IsLocalRole,
     HasFrameRole,
+    PipImageUrlRole,
+    PipVisibleRole,
+    MicActiveRole,
   };
 
   explicit VideoTileModel(QObject* parent = nullptr);

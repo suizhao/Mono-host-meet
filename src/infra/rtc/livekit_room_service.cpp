@@ -1,6 +1,7 @@
 #include "infra/rtc/livekit_room_service.h"
 
 #include <livekit/livekit.h>
+#include <livekit/audio_stream.h>
 #include <livekit/local_audio_track.h>
 #include <livekit/local_participant.h>
 #include <livekit/local_video_track.h>
@@ -12,12 +13,19 @@
 #include <QCoreApplication>
 #include <livekit/video_stream.h>
 
+#include <QAudioDevice>
+#include <QAudioFormat>
+#include <QAudioSink>
+#include <QAudioSource>
 #include <QBuffer>
+#include <QTimer>
 #include <QByteArray>
 #include <QDateTime>
 #include <QDebug>
 #include <QHash>
+#include <QIODevice>
 #include <QImage>
+#include <QMediaDevices>
 #include <QMutexLocker>
 #include <QSet>
 #include <QStringList>
@@ -410,6 +418,7 @@ bool LiveKitRoomService::connect(const QString& serverUrl,
   }
 
   m_connected = true;
+  setupRemoteAudioPlayback();
   return true;
 #endif
 }
@@ -418,13 +427,20 @@ void LiveKitRoomService::disconnect() {
   setScreenShareEnabled(false);
 
   // Stop mic thread and track
-  m_micActive.store(false);
-  if (m_micThread.joinable()) m_micThread.join();
+  stopMicCapture();
   if (m_micTrack && m_room && m_room->localParticipant()) {
     try { m_room->localParticipant()->unpublishTrack(m_micTrack->sid()); } catch (...) {}
   }
   m_micTrack.reset();
   m_micSource.reset();
+
+  // Stop audio output
+  if (m_audioOutput) {
+    m_audioOutput->stop();
+    m_audioOutputIO = nullptr;
+  }
+  m_audioOutput.reset();
+  m_audioCallbackIds.clear();
 
   // Stop camera thread and track
   m_cameraActive.store(false);
@@ -479,19 +495,24 @@ void LiveKitRoomService::disconnect() {
   }
 }
 
-bool LiveKitRoomService::setMicEnabled(bool enabled) {
+bool LiveKitRoomService::setMicEnabled(bool enabled,
+                                        const QString& audioDeviceId) {
   m_lastError.clear();
   if (!m_connected || !m_room || !m_room->localParticipant()) {
     m_lastError = "当前未连接房间，无法切换麦克风";
     return false;
   }
 
+  if (!audioDeviceId.isEmpty()) {
+    m_audioInputDeviceId = audioDeviceId;
+  }
+
   if (enabled && !m_micTrack) {
-    // 首次开启：创建 AudioSource + 发布轨 + 静音线程
     try {
-      m_micSource = std::make_shared<livekit::AudioSource>(48000, 1, 0);
+      m_micSource = std::make_shared<livekit::AudioSource>(48000, 1, 20);
       m_micTrack = m_room->localParticipant()->publishAudioTrack(
           "mic-mvp", m_micSource, livekit::TrackSource::SOURCE_MICROPHONE);
+      m_micTrack->unmute();
     } catch (const std::exception& ex) {
       m_lastError = QString("创建麦克风轨道失败: %1").arg(ex.what());
       return false;
@@ -499,7 +520,7 @@ bool LiveKitRoomService::setMicEnabled(bool enabled) {
       m_lastError = "创建麦克风轨道失败: 未知异常";
       return false;
     }
-    startMicThread();
+    startMicCapture(m_audioInputDeviceId);
     return true;
   }
 
@@ -507,13 +528,10 @@ bool LiveKitRoomService::setMicEnabled(bool enabled) {
     try {
       if (enabled) {
         m_micTrack->unmute();
-        startMicThread();
+        startMicCapture(m_audioInputDeviceId);
       } else {
         m_micTrack->mute();
-        m_micActive.store(false);
-        if (m_micThread.joinable()) {
-          m_micThread.join();
-        }
+        stopMicCapture();
       }
     } catch (const std::exception& ex) {
       m_lastError = QString("切换麦克风失败: %1").arg(ex.what());
@@ -527,6 +545,12 @@ bool LiveKitRoomService::setMicEnabled(bool enabled) {
 
   m_lastError = "未找到可控制的本地音频轨道";
   return false;
+}
+
+void LiveKitRoomService::setAudioOutputDevice(const QString& deviceId) {
+  if (m_audioOutputDeviceId == deviceId) return;
+  m_audioOutputDeviceId = deviceId;
+  setupRemoteAudioPlayback();
 }
 
 bool LiveKitRoomService::setCameraEnabled(bool enabled) {
@@ -550,7 +574,9 @@ bool LiveKitRoomService::setCameraEnabled(bool enabled) {
       m_lastError = "创建摄像头轨道失败: 未知异常";
       return false;
     }
-    startCameraThread();
+    const QString localIdentity =
+        QString::fromStdString(m_room->localParticipant()->identity());
+    startCameraThread(streamKey(localIdentity, livekit::TrackSource::SOURCE_CAMERA));
     return true;
   }
 
@@ -558,7 +584,9 @@ bool LiveKitRoomService::setCameraEnabled(bool enabled) {
     try {
       if (enabled) {
         m_cameraTrack->unmute();
-        startCameraThread();
+        const QString localIdentity =
+            QString::fromStdString(m_room->localParticipant()->identity());
+        startCameraThread(streamKey(localIdentity, livekit::TrackSource::SOURCE_CAMERA));
       } else {
         m_cameraTrack->mute();
         m_cameraActive.store(false);
@@ -605,6 +633,16 @@ bool LiveKitRoomService::setScreenShareEnabled(bool enabled) {
     std::lock_guard<std::mutex> locker(m_screenShareMutex);
     m_screenShareTrack.reset();
     m_screenShareSource.reset();
+
+    // 清理屏幕共享 tile（本地 tile 不受孤儿/超时清理保护）
+    if (m_room && m_room->localParticipant()) {
+      const QString localIdentity =
+          QString::fromStdString(m_room->localParticipant()->identity());
+      const QString shareKey =
+          streamKey(localIdentity, livekit::TrackSource::SOURCE_SCREENSHARE);
+      QMutexLocker stateLocker(&m_remoteState->mutex);
+      m_remoteState->tiles.remove(shareKey);
+    }
     return true;
   }
 
@@ -751,25 +789,150 @@ bool LiveKitRoomService::screenShareEnabled() const {
   return m_screenShareRunning.load() && (m_screenShareTrack != nullptr);
 }
 
-void LiveKitRoomService::startMicThread() {
+void LiveKitRoomService::startMicCapture(const QString& deviceId) {
   if (m_micActive.load()) return;
   m_micActive.store(true);
+
+  if (!deviceId.isEmpty()) {
+    const auto devices = QMediaDevices::audioInputs();
+    QAudioDevice device;
+    for (const auto& d : devices) {
+      if (QString::fromLatin1(d.id()) == deviceId) {
+        device = d;
+        break;
+      }
+    }
+
+    if (!device.isNull()) {
+      // Try Int16, then Float, then preferred
+      QAudioFormat fmt;
+      QAudioFormat int16fmt;
+      int16fmt.setSampleRate(48000);
+      int16fmt.setChannelCount(1);
+      int16fmt.setSampleFormat(QAudioFormat::Int16);
+      QAudioFormat floatFmt;
+      floatFmt.setSampleRate(48000);
+      floatFmt.setChannelCount(1);
+      floatFmt.setSampleFormat(QAudioFormat::Float);
+
+      if (device.isFormatSupported(int16fmt)) {
+        fmt = int16fmt;
+        qInfo() << "Mic: using Int16 format";
+      } else if (device.isFormatSupported(floatFmt)) {
+        fmt = floatFmt;
+        qInfo() << "Mic: using Float format";
+      } else {
+        fmt = device.preferredFormat();
+        qInfo() << "Mic: using preferred format";
+      }
+      qInfo() << "Mic capture using" << device.description()
+              << "@" << fmt.sampleRate() << "Hz ch=" << fmt.channelCount();
+
+      // Capture in dedicated thread using blocking waitForReadyRead()
+      auto src = m_micSource;
+      m_micThread = std::thread([this, device, fmt, src]() {
+        QAudioSource audioSource(device, fmt);
+        QIODevice* io = audioSource.start();
+        if (!io) {
+          qWarning() << "Mic capture: start() returned null in thread";
+          return;
+        }
+
+        constexpr int kFrameMs = 20;
+        constexpr int kSampleRate = 48000;
+        constexpr int kSamplesPerFrame = kSampleRate * kFrameMs / 1000; // 960
+        constexpr int kBytesPerFrame = kSamplesPerFrame * sizeof(int16_t); // 1920
+        QByteArray buffer;
+
+        while (m_micActive.load()) {
+          buffer.append(io->readAll());
+          static int frameCount = 0;
+          while (buffer.size() >= kBytesPerFrame) {
+            auto frame = livekit::AudioFrame::create(kSampleRate, 1, kSamplesPerFrame);
+            auto& buf = frame.data();
+            std::memcpy(buf.data(), buffer.constData(), kBytesPerFrame);
+            buffer.remove(0, kBytesPerFrame);
+            if (++frameCount <= 3) {
+              int maxVal = 0;
+              for (auto s : buf) { int v = s < 0 ? -s : s; if (v > maxVal) maxVal = v; }
+              qInfo() << "Mic frame #" << frameCount << "maxAmplitude:" << maxVal;
+            }
+            try {
+              src->captureFrame(frame, kFrameMs);
+            } catch (...) {
+            }
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds(5));
+        }
+        audioSource.stop();
+      });
+      return;
+    }
+  }
+
+  // Fallback: silent placeholder
   m_micThread = std::thread([this]() {
     while (m_micActive.load()) {
-      auto frame = livekit::AudioFrame::create(48000, 1, 480);
+      auto frame = livekit::AudioFrame::create(48000, 1, 960);
       try {
-        m_micSource->captureFrame(frame, 10);
+        m_micSource->captureFrame(frame, 20);
       } catch (...) {
       }
-      std::this_thread::sleep_for(std::chrono::milliseconds(10));
+      std::this_thread::sleep_for(std::chrono::milliseconds(20));
     }
   });
 }
 
-void LiveKitRoomService::startCameraThread() {
+void LiveKitRoomService::stopMicCapture() {
+  m_micActive.store(false);
+  if (m_micThread.joinable()) {
+    m_micThread.join();
+  }
+}
+
+
+void LiveKitRoomService::setupRemoteAudioPlayback() {
+  if (m_audioOutputIO) {
+    m_audioOutput->stop();
+    m_audioOutputIO = nullptr;
+  }
+  m_audioOutput.reset();
+
+  if (m_audioOutputDeviceId.isEmpty()) {
+    // Use default output device
+    const auto devices = QMediaDevices::audioOutputs();
+    if (devices.isEmpty()) return;
+    m_audioOutputDeviceId = QString::fromLatin1(devices.first().id());
+  }
+
+  const auto devices = QMediaDevices::audioOutputs();
+  QAudioDevice device;
+  for (const auto& d : devices) {
+    if (QString::fromLatin1(d.id()) == m_audioOutputDeviceId) {
+      device = d;
+      break;
+    }
+  }
+  if (device.isNull()) return;
+
+  QAudioFormat fmt;
+  fmt.setSampleRate(48000);
+  fmt.setChannelCount(1);
+  fmt.setSampleFormat(QAudioFormat::Int16);
+
+  m_audioOutput = std::make_unique<QAudioSink>(device, fmt);
+  m_audioOutputIO = m_audioOutput->start();
+  if (m_audioOutputIO) {
+    qInfo() << "LiveKitRoomService: audio output started on" << device.description();
+  }
+}
+
+void LiveKitRoomService::startCameraThread(const QString& cameraTileKey) {
   if (m_cameraActive.load()) return;
   m_cameraActive.store(true);
-  m_cameraThread = std::thread([this]() {
+  std::weak_ptr<RemoteState> weakState = m_remoteState;
+  const QString tileKey = cameraTileKey;
+  m_cameraThread = std::thread([this, weakState, tileKey]() {
     int tick = 0;
     constexpr int kWidth = 640;
     constexpr int kHeight = 480;
@@ -798,6 +961,30 @@ void LiveKitRoomService::startCameraThread() {
                                      livekit::VideoRotation::VIDEO_ROTATION_0);
       } catch (...) {
       }
+
+      // 写 JPEG 预览到 tile，类似屏幕共享的做法
+      if (buf) {
+        const QImage previewFrame(buf, kWidth, kHeight, QImage::Format_RGBA8888);
+        if (!previewFrame.isNull()) {
+          QByteArray encodedBytes;
+          QBuffer buffer(&encodedBytes);
+          if (buffer.open(QIODevice::WriteOnly)) {
+            QImage copy = previewFrame.copy();
+            if (copy.save(&buffer, "JPEG", 75)) {
+              const QString dataUrl =
+                  "data:image/jpeg;base64," + QString::fromLatin1(encodedBytes.toBase64());
+              const auto state = weakState.lock();
+              if (state) {
+                QMutexLocker locker(&state->mutex);
+                if (state->tiles.contains(tileKey)) {
+                  state->tiles[tileKey].dataUrl = dataUrl;
+                }
+              }
+            }
+          }
+        }
+      }
+
       ++tick;
       std::this_thread::sleep_for(frameInterval);
     }
@@ -890,16 +1077,23 @@ void LiveKitRoomService::refreshRemoteState() {
     appendBindings(localIdentity, "我自己", true, m_room->localParticipant()->trackPublications());
   }
 
+  // 当前有效视频轨 key 集合，用于清理不属于当前发布列表的残留 tile
+  QSet<QString> desiredKeys;
+  for (auto it = desiredBindings.cbegin(); it != desiredBindings.cend(); ++it) {
+    desiredKeys.insert(it.key());
+  }
+
   // 为没有视频轨的参与者创建占位 tile（远端 + 本地），确保始终显示在场成员
   {
     QMutexLocker locker(&m_remoteState->mutex);
 
-    // 收集有视频或未静音音频轨的参与者（有任一活跃轨道即视为"确实在房间里"）
-    QSet<QString> identitiesWithActiveTrack;
+    // 视频轨参与者（仅视频，用于决定是否移除占位 tile）
+    QSet<QString> identitiesWithVideoTrack;
     for (auto it = desiredBindings.cbegin(); it != desiredBindings.cend(); ++it) {
-      identitiesWithActiveTrack.insert(it.value().identity);
+      identitiesWithVideoTrack.insert(it.value().identity);
     }
-    // 补充检测音频轨（appendBindings 只看视频）
+
+    // 麦克风活跃参与者（未静音音频轨）
     auto hasActiveAudio = [](const auto& publicationMap) -> bool {
       for (const auto& [sid, pub] : publicationMap) {
         Q_UNUSED(sid);
@@ -909,24 +1103,25 @@ void LiveKitRoomService::refreshRemoteState() {
       }
       return false;
     };
+    QSet<QString> identitiesWithActiveMic;
     for (const auto& participant : remoteParticipants) {
       if (!participant) continue;
       const QString identity = QString::fromStdString(participant->identity());
-      if (!identitiesWithActiveTrack.contains(identity) &&
-          hasActiveAudio(participant->trackPublications())) {
-        identitiesWithActiveTrack.insert(identity);
+      if (hasActiveAudio(participant->trackPublications())) {
+        identitiesWithActiveMic.insert(identity);
       }
     }
     if (m_room->localParticipant()) {
       const QString localId = QString::fromStdString(m_room->localParticipant()->identity());
-      if (!identitiesWithActiveTrack.contains(localId) &&
-          hasActiveAudio(m_room->localParticipant()->trackPublications())) {
-        identitiesWithActiveTrack.insert(localId);
+      if (hasActiveAudio(m_room->localParticipant()->trackPublications())) {
+        identitiesWithActiveMic.insert(localId);
       }
     }
 
-    // 更新"曾有过轨道"的记录；用于判断参与者是否可能已断开
-    for (const auto& identity : identitiesWithActiveTrack) {
+    // 更新"曾有过轨道"的记录（视频或音频均可）；用于判断参与者是否可能已断开
+    QSet<QString> identitiesWithAnyTrack = identitiesWithVideoTrack;
+    identitiesWithAnyTrack.unite(identitiesWithActiveMic);
+    for (const auto& identity : identitiesWithAnyTrack) {
       m_remoteIdsHadTracks.insert(identity);
     }
 
@@ -959,19 +1154,65 @@ void LiveKitRoomService::refreshRemoteState() {
       }
     }
 
-    // 为无视频轨的远端参与者添加占位 tile
+    // 从 desiredKeys 提取有视频轨的参与者的 identity 集合。
+    // 直接用 tile key 的前缀匹配，避免 QString::fromStdString 往返可能引入的差异。
+    QSet<QString> identitiesWithVideo;
+    for (const QString& key : desiredKeys) {
+      int pipe = key.lastIndexOf('|');
+      if (pipe > 0) {
+        identitiesWithVideo.insert(key.left(pipe));
+      }
+    }
+
+    // 单次遍历：清理所有不应存在的 tile
+    for (auto it = m_remoteState->tiles.begin();
+         it != m_remoteState->tiles.end();) {
+      const QString& key = it.key();
+      const VideoTile& tile = it.value();
+
+      // 当前有效视频轨 → 保留
+      if (desiredKeys.contains(key)) {
+        ++it;
+        continue;
+      }
+
+      // 占位 tile：若该参与者有视频轨则移除，否则保留
+      if (tile.sourceText == "无视频流") {
+        if (identitiesWithVideo.contains(tile.identity)) {
+          it = m_remoteState->tiles.erase(it);
+        } else {
+          ++it;
+        }
+        continue;
+      }
+
+      // 本地 tile 且源仍为本地 → 保留（本地屏幕共享等已在 setScreenShareEnabled 清理）
+      if (tile.isLocal) {
+        ++it;
+        continue;
+      }
+
+      // 已离开参与者 → 已在上面清理，此处防御
+      if (!currentRemoteIdentities.contains(tile.identity)) {
+        ++it;
+        continue;
+      }
+
+      // 其余残留 video tile → 移除
+      it = m_remoteState->tiles.erase(it);
+    }
+
+    // 为无视频轨的远端参与者创建占位 tile
     for (const auto& participant : remoteParticipants) {
       if (!participant) {
         continue;
       }
       const QString identity = QString::fromStdString(participant->identity());
-      if (identitiesWithActiveTrack.contains(identity)) {
-        m_remoteState->tiles.remove(identity + "|presence");
-        continue;
-      }
+      if (identitiesWithVideo.contains(identity)) continue;
+      const QString presenceKey = identity + "|presence";
+      if (m_remoteState->tiles.contains(presenceKey)) continue;
       const QString name = QString::fromStdString(participant->name());
       const QString disp = name.isEmpty() ? identity : name;
-      const QString presenceKey = identity + "|presence";
       auto& tile = m_remoteState->tiles[presenceKey];
       tile.tileId = presenceKey;
       tile.identity = identity;
@@ -985,9 +1226,9 @@ void LiveKitRoomService::refreshRemoteState() {
       const QString localIdentity =
           QString::fromStdString(m_room->localParticipant()->identity());
       const QString presenceKey = localIdentity + "|presence";
-      if (identitiesWithActiveTrack.contains(localIdentity)) {
+      if (identitiesWithVideo.contains(localIdentity)) {
         m_remoteState->tiles.remove(presenceKey);
-      } else {
+      } else if (!m_remoteState->tiles.contains(presenceKey)) {
         auto& tile = m_remoteState->tiles[presenceKey];
         tile.tileId = presenceKey;
         tile.identity = localIdentity;
@@ -996,11 +1237,11 @@ void LiveKitRoomService::refreshRemoteState() {
         tile.isLocal = true;
       }
     }
-  }
 
-  QSet<QString> desiredKeys;
-  for (auto it = desiredBindings.cbegin(); it != desiredBindings.cend(); ++it) {
-    desiredKeys.insert(it.key());
+    // 为所有 tile 设置麦克风活跃状态
+    for (auto it = m_remoteState->tiles.begin(); it != m_remoteState->tiles.end(); ++it) {
+      it.value().micActive = identitiesWithActiveMic.contains(it.value().identity);
+    }
   }
 
   {
@@ -1045,6 +1286,41 @@ void LiveKitRoomService::refreshRemoteState() {
     if (!orphanKeys.isEmpty()) {
       QMutexLocker stateLocker(&m_remoteState->mutex);
       for (const QString& key : orphanKeys) {
+        m_remoteState->tiles.remove(key);
+      }
+    }
+  }
+
+  // 直接清理：任何非占位、非本地 tile，如果不在 desiredKeys 中，
+  // 说明对应轨道已取消发布，立即移除。补偿 SDK onTrackUnpublished 可能不触发的问题。
+  {
+    QSet<QString> keysToRemove;
+    {
+      QMutexLocker stateLocker(&m_remoteState->mutex);
+      for (auto it = m_remoteState->tiles.cbegin();
+           it != m_remoteState->tiles.cend(); ++it) {
+        if (it.value().sourceText == "无视频流") continue;
+        if (it.value().isLocal) continue;
+        if (!desiredKeys.contains(it.key())) {
+          keysToRemove.insert(it.key());
+        }
+      }
+    }
+    if (!keysToRemove.isEmpty()) {
+      // 同时清理可能残留的帧回调
+      for (const QString& key : keysToRemove) {
+        QMutexLocker bindLocker(&m_streamBindingsMutex);
+        if (m_streamBindings.contains(key)) {
+          const auto binding = m_streamBindings.value(key);
+          try {
+            m_room->clearOnVideoFrameCallback(binding.identity.toStdString(),
+                                              binding.source);
+          } catch (...) {}
+          m_streamBindings.remove(key);
+        }
+      }
+      QMutexLocker stateLocker(&m_remoteState->mutex);
+      for (const QString& key : keysToRemove) {
         m_remoteState->tiles.remove(key);
       }
     }
@@ -1199,6 +1475,47 @@ void LiveKitRoomService::refreshRemoteState() {
       }
     }
   }
+
+  // Register audio frame callbacks for remote participants to route PCM to QAudioSink
+  if (m_audioOutputIO) {
+    for (const auto& participant : remoteParticipants) {
+      if (!participant) continue;
+      const QString identity = QString::fromStdString(participant->identity());
+      if (m_audioCallbackIds.contains(identity)) continue;
+      m_audioCallbackIds.insert(identity);
+
+      livekit::AudioStream::Options audioOpts;
+      m_room->setOnAudioFrameCallback(
+          identity.toStdString(),
+          livekit::TrackSource::SOURCE_MICROPHONE,
+          [this, identity](const livekit::AudioFrame& frame) {
+            if (!m_audioOutputIO) return;
+            const auto& data = frame.data();
+            if (data.empty()) return;
+            static int frameCount = 0;
+            if (++frameCount <= 3) {
+              qInfo() << "AudioFrame received from" << identity
+                      << "samples:" << data.size()
+                      << "sample_rate:" << frame.sample_rate()
+                      << "channels:" << frame.num_channels();
+            }
+            qint64 written = m_audioOutputIO->write(
+                reinterpret_cast<const char*>(data.data()),
+                static_cast<qint64>(data.size() * sizeof(int16_t)));
+            if (frameCount == 50) {
+              // Check if audio data is actually non-silent
+              int16_t maxVal = 0;
+              for (auto s : data) { if ((s < 0 ? -s : s) > maxVal) maxVal = (s < 0 ? -s : s); }
+              qInfo() << "Audio output state:" << int(m_audioOutput->state())
+                      << "error:" << int(m_audioOutput->error())
+                      << "bytesFree:" << m_audioOutput->bytesFree()
+                      << "bufferSize:" << m_audioOutput->bufferSize()
+                      << "maxAmplitude:" << maxVal;
+            }
+          },
+          audioOpts);
+    }
+  }
 }
 
 QString LiveKitRoomService::remoteParticipantsText() const {
@@ -1225,14 +1542,27 @@ QVariantList LiveKitRoomService::remoteVideoTiles() const {
     return a.tileId < b.tileId;
   });
 
+  const qint64 nowMs = QDateTime::currentMSecsSinceEpoch();
   list.reserve(tiles.size());
   for (const auto& tile : tiles) {
+    // 屏幕共享 tile：超过 1 秒无帧或从未收到帧 → 降级为占位 tile
+    bool shareIsStale = false;
+    if (tile.sourceText == "屏幕共享") {
+      if (tile.dataUrl.isEmpty()) {
+        shareIsStale = true;
+      } else if (tile.lastFrameMs > 0 && nowMs - tile.lastFrameMs > 1000) {
+        shareIsStale = true;
+      }
+    }
+    const QString effectiveSource = shareIsStale ? QString("无视频流") : tile.sourceText;
+
     QVariantMap map;
     map.insert("tileId", tile.tileId);
     map.insert("identity", tile.identity);
     map.insert("displayName", tile.displayName);
-    map.insert("sourceText", tile.sourceText);
+    map.insert("sourceText", effectiveSource);
     map.insert("isLocal", tile.isLocal);
+    map.insert("micActive", tile.micActive);
     map.insert("dataUrl", tile.dataUrl);
     list.push_back(map);
   }

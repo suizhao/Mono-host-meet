@@ -4,6 +4,7 @@
 #include <livekit/room_delegate.h>
 #include <livekit/track.h>
 
+#include <QBuffer>
 #include <QHash>
 #include <QMutex>
 #include <QString>
@@ -13,6 +14,11 @@
 #include <memory>
 #include <mutex>
 #include <thread>
+
+class QAudioSink;
+class QAudioSource;
+class QIODevice;
+class QTimer;
 
 namespace livekit {
 class Room;
@@ -36,7 +42,9 @@ public:
                const QString& videoDeviceId = "",
                const QString& e2eePassphrase = "") override;
   void disconnect() override;
-  bool setMicEnabled(bool enabled) override;
+  void setAudioOutputDevice(const QString& deviceId) override;
+  bool setMicEnabled(bool enabled,
+                      const QString& audioDeviceId = "") override;
   bool setCameraEnabled(bool enabled) override;
   bool setScreenShareEnabled(bool enabled) override;
   bool screenShareEnabled() const override;
@@ -82,6 +90,7 @@ private:
     QString sourceText;
     QString dataUrl;
     bool isLocal = false;
+    bool micActive = false;
     qint64 lastFrameMs = 0;
   };
 
@@ -103,14 +112,26 @@ private:
   QSet<QString> m_remoteIdsHadTracks;
 
   // Mic
-  void startMicThread();
-  void startCameraThread();
+  void startMicCapture(const QString& deviceId);
+  void stopMicCapture();
+  void startCameraThread(const QString& cameraTileKey);
 
   std::shared_ptr<livekit::AudioSource> m_micSource;
   std::shared_ptr<livekit::LocalAudioTrack> m_micTrack;
   std::atomic<bool> m_micActive{false};
   std::thread m_micThread;
+  QString m_audioInputDeviceId;
 
+  // Audio
+  QSet<QString> m_audioCallbackIds;
+
+  // Audio output (speaker)
+  void setupRemoteAudioPlayback();
+  QString m_audioOutputDeviceId;
+  std::unique_ptr<QAudioSink> m_audioOutput;
+  QIODevice* m_audioOutputIO = nullptr;
+
+private:
   // Camera
   std::shared_ptr<livekit::VideoSource> m_cameraSource;
   std::shared_ptr<livekit::LocalVideoTrack> m_cameraTrack;

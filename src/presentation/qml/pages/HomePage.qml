@@ -5,7 +5,6 @@ import QtQuick.Layouts
 Page {
     title: "Home"
     property bool settingsPanelOpen: false
-    property bool settingsPanelDidAutoRefresh: false
 
     ColumnLayout {
         anchors.fill: parent
@@ -78,6 +77,47 @@ Page {
                                 fillMode: Image.PreserveAspectFit
                             }
 
+                            // PiP 小窗：画中画嵌入在当前 tile 右下角
+                            Rectangle {
+                                visible: pipVisible
+                                anchors.right: parent.right
+                                anchors.rightMargin: 6
+                                anchors.bottom: parent.bottom
+                                anchors.bottomMargin: 34
+                                width: parent.width * 0.28
+                                height: parent.height * 0.28
+                                color: "#20242c"
+                                radius: 4
+                                border.width: 1
+                                border.color: "#4CAF50"
+                                z: 5
+
+                                Image {
+                                    anchors.fill: parent
+                                    anchors.margins: 1
+                                    source: pipImageUrl
+                                    cache: false
+                                    fillMode: Image.PreserveAspectFit
+                                }
+
+                                Rectangle {
+                                    anchors.left: parent.left
+                                    anchors.right: parent.right
+                                    anchors.bottom: parent.bottom
+                                    height: 16
+                                    color: "#88000000"
+
+                                    Label {
+                                        anchors.fill: parent
+                                        horizontalAlignment: Text.AlignHCenter
+                                        verticalAlignment: Text.AlignVCenter
+                                        text: "摄像头"
+                                        color: "#e8edf8"
+                                        font.pixelSize: 9
+                                    }
+                                }
+                            }
+
                             Rectangle {
                                 anchors.left: parent.left
                                 anchors.right: parent.right
@@ -85,13 +125,35 @@ Page {
                                 height: 28
                                 color: "#66000000"
 
-                                Label {
-                                    anchors.left: parent.left
+                                RowLayout {
+                                    anchors.fill: parent
                                     anchors.leftMargin: 8
-                                    anchors.verticalCenter: parent.verticalCenter
-                                    text: displayName + " · " + sourceText
-                                    color: "#e8edf8"
-                                    font.pixelSize: 12
+                                    anchors.rightMargin: 8
+                                    spacing: 6
+
+                                    Label {
+                                        text: displayName + " · " + sourceText
+                                        color: "#e8edf8"
+                                        font.pixelSize: 12
+                                        Layout.alignment: Qt.AlignVCenter
+                                    }
+
+                                    Rectangle {
+                                        visible: micActive
+                                        width: micLabel.implicitWidth + 10
+                                        height: 18
+                                        radius: 9
+                                        color: "#4CAF50"
+                                        Layout.alignment: Qt.AlignVCenter
+
+                                        Label {
+                                            id: micLabel
+                                            anchors.centerIn: parent
+                                            text: "麦克风已开"
+                                            color: "white"
+                                            font.pixelSize: 9
+                                        }
+                                    }
                                 }
                             }
 
@@ -121,51 +183,7 @@ Page {
                     }
                 }
 
-                // PiP：摄像头小窗浮动在屏幕共享右下角
-                Rectangle {
-                    visible: roomController.cameraPipVisible
-                    anchors.right: parent.right
-                    anchors.rightMargin: 12
-                    anchors.bottom: parent.bottom
-                    anchors.bottomMargin: 12
-                    width: 160
-                    height: 120
-                    color: "#20242c"
-                    radius: 6
-                    border.width: 1
-                    border.color: "#4CAF50"
-                    z: 10
 
-                    Image {
-                        anchors.fill: parent
-                        anchors.margins: 1
-                        source: roomController.cameraPipImageUrl
-                        cache: false
-                        fillMode: Image.PreserveAspectFit
-                    }
-
-                    Rectangle {
-                        anchors.left: parent.left
-                        anchors.right: parent.right
-                        anchors.bottom: parent.bottom
-                        height: 20
-                        color: "#66000000"
-
-                        Label {
-                            anchors.fill: parent
-                            horizontalAlignment: Text.AlignHCenter
-                            verticalAlignment: Text.AlignVCenter
-                            text: "摄像头"
-                            color: "#e8edf8"
-                            font.pixelSize: 10
-                        }
-                    }
-
-                    MouseArea {
-                        anchors.fill: parent
-                        onClicked: roomController.hideCameraPip()
-                    }
-                }
             }
         }
 
@@ -267,11 +285,9 @@ Page {
                         text: settingsPanelOpen ? "收起设置面板" : "展开设置面板"
                         Layout.fillWidth: true
                         onClicked: {
-                            const willOpen = !settingsPanelOpen
-                            settingsPanelOpen = willOpen
-                            if (willOpen && !settingsPanelDidAutoRefresh) {
+                            settingsPanelOpen = !settingsPanelOpen
+                            if (settingsPanelOpen) {
                                 roomController.refreshDevices()
-                                settingsPanelDidAutoRefresh = true
                             }
                         }
                     }
