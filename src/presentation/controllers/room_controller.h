@@ -30,6 +30,7 @@ class RoomController : public QObject {
   Q_PROPERTY(QString remoteVideoDataUrl READ remoteVideoDataUrl NOTIFY remoteVideoDataUrlChanged)
   Q_PROPERTY(QString remoteVideoSourceText READ remoteVideoSourceText NOTIFY remoteVideoSourceTextChanged)
   Q_PROPERTY(bool hasRemoteVideo READ hasRemoteVideo NOTIFY hasRemoteVideoChanged)
+  Q_PROPERTY(QVariantList participantTracks READ participantTracks NOTIFY participantTracksChanged)
   Q_PROPERTY(QVariantList audioInputDevices READ audioInputDevices NOTIFY audioInputDevicesChanged)
   Q_PROPERTY(QVariantList videoInputDevices READ videoInputDevices NOTIFY videoInputDevicesChanged)
   Q_PROPERTY(QVariantList audioOutputDevices READ audioOutputDevices NOTIFY audioOutputDevicesChanged)
@@ -56,6 +57,7 @@ public:
   QString remoteVideoDataUrl() const;
   QString remoteVideoSourceText() const;
   bool hasRemoteVideo() const;
+  QVariantList participantTracks() const;
   QVariantList audioInputDevices() const;
   QVariantList videoInputDevices() const;
   QVariantList audioOutputDevices() const;
@@ -87,6 +89,7 @@ signals:
   void remoteVideoDataUrlChanged();
   void remoteVideoSourceTextChanged();
   void hasRemoteVideoChanged();
+  void participantTracksChanged();
   void audioInputDevicesChanged();
   void videoInputDevicesChanged();
   void audioOutputDevicesChanged();
@@ -111,6 +114,7 @@ private:
   QString m_remoteParticipantsText = "远端参与者：0";
   VideoTileModel m_remoteVideoTileModel;
   QVariantList m_remoteVideoTiles;
+  QVariantList m_participantTracks;
   QHash<QString, int> m_tileFrameVersions;
   QString m_remoteVideoDataUrl;
   QString m_remoteVideoSourceText = "当前画面来源：无";

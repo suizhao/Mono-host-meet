@@ -13,10 +13,20 @@ public:
                             const QString& region = "",
                             const QString& metadata = "") override;
   void createRoom(const QString& participantName) override;
-  void startRecording(const QString& roomName) override;
-  void stopRecording(const QString& roomName) override;
+  void startRecording(const QString& roomName,
+                      const QString& participantName,
+                      const QStringList& audioTrackSids = {},
+                      const QStringList& videoTrackSids = {}) override;
+  void stopRecording(const QString& roomName,
+                     const QString& participantName) override;
+  void disbandRoom(const QString& roomName,
+                   const QString& participantName) override;
+  void muteAllParticipants(const QString& roomName,
+                           const QString& participantName) override;
 
 private:
+  void postJson(const QString& path, const QJsonObject& body,
+                std::function<void(const QJsonDocument&, int)> onReply);
   QString buildUrl(const QString& path) const;
   void emitNetworkError(const QString& operation, int statusCode,
                         const QString& fallbackMessage,

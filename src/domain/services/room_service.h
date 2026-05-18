@@ -29,8 +29,12 @@ public:
   virtual QString remoteVideoDataUrl() const = 0;
   virtual QVariantList remoteVideoTiles() const = 0;
   virtual QString remoteVideoSourceText() const = 0;
+  virtual QVariantList participantTracks() const = 0;
+  virtual void publishData(const QByteArray& data,
+                           const QString& topic = QString()) = 0;
   virtual QString lastError() const = 0;
 
 signals:
   void remoteStateDirty();
+  void hostCommandReceived(const QString& cmd);
 };

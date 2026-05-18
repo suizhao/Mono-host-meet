@@ -52,7 +52,10 @@ public:
   QString remoteParticipantsText() const override;
   QString remoteVideoDataUrl() const override;
   QVariantList remoteVideoTiles() const override;
+  QVariantList participantTracks() const override;
   QString remoteVideoSourceText() const override;
+  void publishData(const QByteArray& data,
+                   const QString& topic = QString()) override;
   QString lastError() const override;
 
   // livekit::RoomDelegate — event-driven updates
@@ -66,6 +69,9 @@ public:
                           const livekit::TrackUnpublishedEvent& event) override;
   void onTrackSubscribed(livekit::Room&,
                          const livekit::TrackSubscribedEvent& event) override;
+  void onUserPacketReceived(
+      livekit::Room&,
+      const livekit::UserDataPacketEvent& event) override;
 
 private slots:
   void doHandleParticipantConnected();
@@ -73,6 +79,7 @@ private slots:
   void doHandleTrackUnpublished(const QString& identity,
                                 livekit::TrackSource source);
   void doHandleTrackSubscribed();
+  void doHandleUserPacketReceived(const QString& topic, const QByteArray& payload);
 
 private:
   struct StreamBinding {

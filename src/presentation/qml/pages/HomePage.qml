@@ -320,6 +320,43 @@ Page {
                     }
                 }
 
+                RowLayout {
+                    visible: homeController.isHost && homeController.inRoom
+                    Layout.fillWidth: true
+                    spacing: 8
+
+                    Button {
+                        text: "解散房间"
+                        Layout.fillWidth: true
+                        onClicked: homeController.disbandRoom()
+                    }
+
+                    Button {
+                        text: homeController.allMuted ? "解除全员静音" : "全员静音"
+                        Layout.fillWidth: true
+                        onClicked: homeController.toggleMuteAll()
+                    }
+
+                    Button {
+                        text: homeController.recordingActive ? "停止录制" : "开始录制"
+                        enabled: !homeController.recordingRequestInFlight
+                        Layout.fillWidth: true
+                        onClicked: {
+                            if (homeController.recordingActive)
+                                homeController.stopRecording()
+                            else
+                                homeController.startRecording([], [])
+                        }
+                    }
+
+                    Label {
+                        text: homeController.recordingStatusText
+                        color: "#aeb8ca"
+                        font.pixelSize: 10
+                        Layout.preferredWidth: 80
+                    }
+                }
+
                 Button {
                     visible: !homeController.prejoinVisible
                     text: "离开房间（SDK）"
@@ -391,39 +428,6 @@ Page {
                             Layout.fillWidth: true
                         }
 
-                        Rectangle {
-                            Layout.fillWidth: true
-                            height: 1
-                            color: "#d0d0d0"
-                        }
-
-                        Label {
-                            text: "录制设置"
-                            font.bold: true
-                        }
-
-                        RowLayout {
-                            Layout.fillWidth: true
-                            spacing: 12
-
-                            Button {
-                                text: homeController.recordingActive ? "录制中" : "开始录制（API）"
-                                enabled: homeController.inRoom && !homeController.recordingRequestInFlight
-                                Layout.fillWidth: true
-                                onClicked: homeController.startRecording()
-                            }
-
-                            Button {
-                                text: "停止录制（API）"
-                                enabled: homeController.inRoom && !homeController.recordingRequestInFlight
-                                Layout.fillWidth: true
-                                onClicked: homeController.stopRecording()
-                            }
-                        }
-
-                        Label {
-                            text: homeController.recordingStatusText
-                        }
                     }
                 }
 

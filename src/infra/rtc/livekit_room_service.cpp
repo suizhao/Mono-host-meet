@@ -23,6 +23,8 @@
 #include <QDateTime>
 #include <QDebug>
 #include <QHash>
+#include <QJsonDocument>
+#include <QJsonObject>
 #include <QIODevice>
 #include <QImage>
 #include <QMediaDevices>
@@ -468,17 +470,17 @@ void LiveKitRoomService::disconnect() {
   // 在 Room 对象仍存活时主动关闭 SDK，确保 WebSocket 能发送 Close Frame，
   // 让服务端即时感知断开。仅在正常离会路径执行；析构时跳过以避免崩溃。
   if (m_livekitInitialized && !QCoreApplication::closingDown()) {
-    livekit::shutdown();
+    try {
+      livekit::shutdown();
+    } catch (...) {
+    }
     m_livekitInitialized = false;
   }
 
   if (m_room) {
     m_room.reset();
   }
-  {
-    QMutexLocker locker(&m_streamBindingsMutex);
-    m_streamBindings.clear();
-  }
+  m_connected = false;
 
   {
     QMutexLocker locker(&m_remoteState->mutex);
@@ -489,10 +491,6 @@ void LiveKitRoomService::disconnect() {
   }
 
   m_remoteIdsHadTracks.clear();
-
-  if (m_connected) {
-    m_connected = false;
-  }
 }
 
 bool LiveKitRoomService::setMicEnabled(bool enabled,
@@ -1569,9 +1567,90 @@ QVariantList LiveKitRoomService::remoteVideoTiles() const {
   return list;
 }
 
+QVariantList LiveKitRoomService::participantTracks() const {
+  QVariantList list;
+  if (!m_room) return list;
+
+  // 本地参与者
+  if (auto* lp = m_room->localParticipant()) {
+    const QString identity = QString::fromStdString(lp->identity());
+    const QString name = QString::fromStdString(lp->name());
+    for (const auto& [sid, pub] : lp->trackPublications()) {
+      Q_UNUSED(sid);
+      if (!pub) continue;
+      QVariantMap map;
+      map.insert("participantIdentity", identity);
+      map.insert("participantName", name.isEmpty() ? identity : name);
+      map.insert("trackSid", QString::fromStdString(pub->sid()));
+      map.insert("kind",
+                 pub->kind() == livekit::TrackKind::KIND_AUDIO ? "audio" : "video");
+      map.insert("source", static_cast<int>(pub->source()));
+      map.insert("muted", pub->muted());
+      list.push_back(map);
+    }
+  }
+
+  // 远端参与者
+  for (const auto& p : m_room->remoteParticipants()) {
+    if (!p) continue;
+    const QString identity = QString::fromStdString(p->identity());
+    const QString name = QString::fromStdString(p->name());
+    for (const auto& [sid, pub] : p->trackPublications()) {
+      Q_UNUSED(sid);
+      if (!pub) continue;
+      QVariantMap map;
+      map.insert("participantIdentity", identity);
+      map.insert("participantName", name.isEmpty() ? identity : name);
+      map.insert("trackSid", QString::fromStdString(pub->sid()));
+      map.insert("kind",
+                 pub->kind() == livekit::TrackKind::KIND_AUDIO ? "audio" : "video");
+      map.insert("source", static_cast<int>(pub->source()));
+      map.insert("muted", pub->muted());
+      list.push_back(map);
+    }
+  }
+
+  return list;
+}
+
 QString LiveKitRoomService::remoteVideoSourceText() const {
   QMutexLocker locker(&m_remoteState->mutex);
   return m_remoteState->videoSourceText;
+}
+
+void LiveKitRoomService::publishData(const QByteArray& data,
+                                     const QString& topic) {
+  if (!m_room || !m_room->localParticipant()) return;
+  const auto vec = std::vector<std::uint8_t>(data.begin(), data.end());
+  m_room->localParticipant()->publishData(
+      vec, false, {}, topic.toStdString());
+}
+
+// ---------------------------------------------------------------------------
+// RoomDelegate — host command reception via data channel
+// ---------------------------------------------------------------------------
+
+void LiveKitRoomService::onUserPacketReceived(
+    livekit::Room&, const livekit::UserDataPacketEvent& event) {
+  if (event.data.empty()) return;
+  const QString topic = QString::fromStdString(event.topic);
+  const QByteArray payload(
+      reinterpret_cast<const char*>(event.data.data()),
+      static_cast<int>(event.data.size()));
+  QMetaObject::invokeMethod(
+      this, "doHandleUserPacketReceived", Qt::QueuedConnection,
+      Q_ARG(QString, topic), Q_ARG(QByteArray, payload));
+}
+
+void LiveKitRoomService::doHandleUserPacketReceived(const QString& topic,
+                                                    const QByteArray& payload) {
+  Q_UNUSED(topic);
+  QJsonParseError err;
+  const auto doc = QJsonDocument::fromJson(payload, &err);
+  if (err.error != QJsonParseError::NoError || !doc.isObject()) return;
+  const QString cmd = doc.object().value("cmd").toString();
+  if (cmd.isEmpty()) return;
+  emit hostCommandReceived(cmd);
 }
 
 QString LiveKitRoomService::lastError() const { return m_lastError; }

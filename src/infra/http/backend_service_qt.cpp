@@ -1,5 +1,6 @@
 #include "infra/http/backend_service_qt.h"
 
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QNetworkReply>
@@ -7,6 +8,8 @@
 #include <QUrl>
 #include <QUrlQuery>
 #include <QDebug>
+
+#include <functional>
 
 BackendServiceQt::BackendServiceQt(QString baseUrl, QObject* parent)
     : IBackendService(parent), m_baseUrl(std::move(baseUrl)) {}
@@ -78,6 +81,7 @@ void BackendServiceQt::parseConnectionDetailsResponse(
   const QString room = obj.value("roomName").toString();
   const QString participant = obj.value("participantName").toString();
   const QString token = obj.value("participantToken").toString();
+  const bool isHost = obj.value("isHost").toBool(false);
 
   if (serverUrl.isEmpty() || room.isEmpty() || participant.isEmpty() ||
       token.isEmpty()) {
@@ -86,57 +90,56 @@ void BackendServiceQt::parseConnectionDetailsResponse(
     return;
   }
 
-  emit connectionDetailsReady(serverUrl, room, participant, token);
+  emit connectionDetailsReady(serverUrl, room, participant, token, isHost);
 }
 
-void BackendServiceQt::startRecording(const QString& roomName) {
-  QUrl url(buildUrl("/api/record/start"));
-  QUrlQuery query;
-  query.addQueryItem("roomName", roomName);
-  url.setQuery(query);
+void BackendServiceQt::startRecording(const QString& roomName,
+                                       const QString& participantName,
+                                       const QStringList& audioTrackSids,
+                                       const QStringList& videoTrackSids) {
+  QJsonObject body;
+  body["roomName"] = roomName;
+  body["participantName"] = participantName;
+  QJsonArray audioArr;
+  for (const auto& s : audioTrackSids) audioArr.push_back(s);
+  body["audioTrackSids"] = audioArr;
+  QJsonArray videoArr;
+  for (const auto& s : videoTrackSids) videoArr.push_back(s);
+  body["videoTrackSids"] = videoArr;
 
-  QNetworkRequest request(url);
-  const auto reply = m_networkAccessManager.get(request);
-  connect(reply, &QNetworkReply::finished, this, [this, reply, roomName]() {
-    const QByteArray responseBody = reply->readAll();
-    const int statusCode =
-        reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-    const QString operation = "record-start";
-
-    if (reply->error() != QNetworkReply::NoError || statusCode >= 400) {
-      emitNetworkError(operation, statusCode, reply->errorString(), responseBody);
-      reply->deleteLater();
-      return;
-    }
-
-    emit recordingOperationSucceeded(operation, roomName);
-    reply->deleteLater();
-  });
+  postJson("/api/recording/start", body,
+           [this, roomName](const QJsonDocument& doc, int statusCode) {
+             if (statusCode >= 400) {
+               const QString msg = doc.isObject()
+                                       ? doc.object().value("message").toString()
+                                       : "开始录制失败";
+               emit backendErrorOccurred("record-start", statusCode, msg);
+               return;
+             }
+             const QString egressId = doc.isObject()
+                                          ? doc.object().value("egressId").toString()
+                                          : QString();
+             emit recordingStarted(roomName, egressId);
+           });
 }
 
-void BackendServiceQt::stopRecording(const QString& roomName) {
-  QUrl url(buildUrl("/api/record/stop"));
-  QUrlQuery query;
-  query.addQueryItem("roomName", roomName);
-  url.setQuery(query);
+void BackendServiceQt::stopRecording(const QString& roomName,
+                                      const QString& participantName) {
+  QJsonObject body;
+  body["roomName"] = roomName;
+  body["participantName"] = participantName;
 
-  QNetworkRequest request(url);
-  const auto reply = m_networkAccessManager.get(request);
-  connect(reply, &QNetworkReply::finished, this, [this, reply, roomName]() {
-    const QByteArray responseBody = reply->readAll();
-    const int statusCode =
-        reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
-    const QString operation = "record-stop";
-
-    if (reply->error() != QNetworkReply::NoError || statusCode >= 400) {
-      emitNetworkError(operation, statusCode, reply->errorString(), responseBody);
-      reply->deleteLater();
-      return;
-    }
-
-    emit recordingOperationSucceeded(operation, roomName);
-    reply->deleteLater();
-  });
+  postJson("/api/recording/stop", body,
+           [this, roomName](const QJsonDocument& doc, int statusCode) {
+             if (statusCode >= 400) {
+               const QString msg = doc.isObject()
+                                       ? doc.object().value("message").toString()
+                                       : "停止录制失败";
+               emit backendErrorOccurred("record-stop", statusCode, msg);
+               return;
+             }
+             emit recordingStopped(roomName);
+           });
 }
 
 QString BackendServiceQt::buildUrl(const QString& path) const {
@@ -167,4 +170,63 @@ void BackendServiceQt::emitNetworkError(const QString& operation, int statusCode
   }
 
   emit backendErrorOccurred(operation, statusCode, message);
+}
+
+void BackendServiceQt::postJson(
+    const QString& path, const QJsonObject& body,
+    std::function<void(const QJsonDocument&, int)> onReply) {
+  QUrl url(buildUrl(path));
+  QNetworkRequest request(url);
+  request.setHeader(QNetworkRequest::ContentTypeHeader, "application/json");
+
+  const QByteArray data = QJsonDocument(body).toJson(QJsonDocument::Compact);
+  const auto reply = m_networkAccessManager.post(request, data);
+  connect(reply, &QNetworkReply::finished, this, [this, reply, onReply]() {
+    const QByteArray responseBody = reply->readAll();
+    const int statusCode =
+        reply->attribute(QNetworkRequest::HttpStatusCodeAttribute).toInt();
+    const auto doc = QJsonDocument::fromJson(responseBody);
+    onReply(doc, statusCode);
+    reply->deleteLater();
+  });
+}
+
+void BackendServiceQt::disbandRoom(const QString& roomName,
+                                   const QString& participantName) {
+  QJsonObject body;
+  body["roomName"] = roomName;
+  body["participantName"] = participantName;
+
+  postJson("/api/room/disband", body,
+           [this, roomName](const QJsonDocument& doc, int statusCode) {
+             if (statusCode >= 400) {
+               const QString msg = doc.isObject()
+                                       ? doc.object().value("message").toString()
+                                       : "解散房间失败";
+               emit backendErrorOccurred("disband-room", statusCode, msg);
+               return;
+             }
+             emit roomDisbanded(roomName);
+           });
+}
+
+void BackendServiceQt::muteAllParticipants(const QString& roomName,
+                                           const QString& participantName) {
+  QJsonObject body;
+  body["roomName"] = roomName;
+  body["participantName"] = participantName;
+
+  postJson("/api/room/mute-all", body,
+           [this, roomName](const QJsonDocument& doc, int statusCode) {
+             if (statusCode >= 400) {
+               const QString msg = doc.isObject()
+                                       ? doc.object().value("message").toString()
+                                       : "全员静音失败";
+               emit backendErrorOccurred("mute-all", statusCode, msg);
+               return;
+             }
+             const int count =
+                 doc.isObject() ? doc.object().value("mutedCount").toInt(0) : 0;
+             emit muteAllCompleted(roomName, count);
+           });
 }

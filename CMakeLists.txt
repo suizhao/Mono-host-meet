@@ -12,7 +12,7 @@ list(APPEND CMAKE_MODULE_PATH "${CMAKE_CURRENT_SOURCE_DIR}/cmake")
 include(LiveKitSDK)
 
 livekit_sdk_setup(
-  VERSION latest #"${LIVEKIT_SDK_VERSION}"
+  VERSION 0.3.4
   SDK_DIR "${CMAKE_BINARY_DIR}/_deps/livekit-sdk"
   GITHUB_TOKEN "$ENV{GITHUB_TOKEN}"
 )

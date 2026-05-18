@@ -412,10 +412,20 @@ void RoomController::refreshRemoteDisplayState() {
     emit remoteVideoDataUrlChanged();
   }
 
+  const QVariantList nextParticipantTracks = m_roomService->participantTracks();
+  if (m_participantTracks != nextParticipantTracks) {
+    m_participantTracks = nextParticipantTracks;
+    emit participantTracksChanged();
+  }
+
   if (oldHasRemoteVideo != hasRemoteVideo()) {
     emit hasRemoteVideoChanged();
   }
 
+}
+
+QVariantList RoomController::participantTracks() const {
+  return m_participantTracks;
 }
 
 void RoomController::setTrackError(const QString& message) {

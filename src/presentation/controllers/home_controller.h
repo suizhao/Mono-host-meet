@@ -34,6 +34,8 @@ class HomeController : public QObject {
 
   Q_PROPERTY(QString recordingStatusText READ recordingStatusText NOTIFY recordingStatusTextChanged)
   Q_PROPERTY(QString currentRoomName READ currentRoomName NOTIFY currentRoomNameChanged)
+  Q_PROPERTY(bool isHost READ isHost NOTIFY isHostChanged)
+  Q_PROPERTY(bool allMuted READ allMuted NOTIFY allMutedChanged)
   Q_PROPERTY(bool prejoinVisible READ prejoinVisible NOTIFY prejoinVisibleChanged)
   Q_PROPERTY(QString defaultParticipantName READ defaultParticipantName NOTIFY defaultParticipantNameChanged)
 
@@ -62,6 +64,7 @@ public:
   bool recordingRequestInFlight() const;
   QString recordingStatusText() const;
   QString currentRoomName() const;
+  bool isHost() const;
   bool prejoinVisible() const;
   QString defaultParticipantName() const;
 
@@ -71,8 +74,12 @@ public:
                                      const QString& participantName);
   Q_INVOKABLE void cancelCustomJoin();
   Q_INVOKABLE void leaveRoom();
-  Q_INVOKABLE void startRecording();
+  Q_INVOKABLE void startRecording(const QVariantList& audioSids = {},
+                                   const QVariantList& videoSids = {});
   Q_INVOKABLE void stopRecording();
+  Q_INVOKABLE void disbandRoom();
+  Q_INVOKABLE void toggleMuteAll();
+  bool allMuted() const;
 
 
 
@@ -94,6 +101,8 @@ signals:
 
   void recordingStatusTextChanged();
   void currentRoomNameChanged();
+  void isHostChanged();
+  void allMutedChanged();
   void prejoinVisibleChanged();
   void defaultParticipantNameChanged();
 
@@ -111,6 +120,8 @@ private:
   void clearErrorBanner();
   void setCurrentRoomName(QString name);
   void setPrejoinVisible(bool value);
+  void onRoomDisbanded(const QString& roomName);
+  void onMuteAllCompleted(const QString& roomName, int mutedCount);
 
   QString buildUserFacingError(const QString& operation, int statusCode,
 
@@ -136,8 +147,11 @@ private:
 
   bool m_recordingActive = false;
 
+  QString m_recordingEgressId;
   bool m_recordingRequestInFlight = false;
 
+  bool m_isHost = false;
+  bool m_allMuted = false;
   QString m_recordingStatusText = "录制状态：未开始";
   QString m_currentRoomName;
   bool m_prejoinVisible = false;
