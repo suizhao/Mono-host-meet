@@ -1,0 +1,21 @@
+# Build artifacts
+build/
+_build/
+out/
+
+# IDE
+.qtcreator/CMakeLists.txt.user
+.vscode/
+.idea/
+
+# Claude Code
+.claude/
+
+# OS files
+.DS_Store
+Thumbs.db
+*.swp
+*.tmp
+
+# Secrets
+.env
